@@ -247,6 +247,8 @@ function startSolo(botCount, playerName) {
     obstacles: makeObstacles(),
     pickups: makePickups(),
     walls: [],
+    airdrops: [],
+    nextAirdrop: 30,
     kills: 0,
     storm: {
       cx: WORLD_SIZE/2, cy: WORLD_SIZE/2,
@@ -274,6 +276,7 @@ function makeSoloPlayer(name) {
     x: WORLD_SIZE/2, y: WORLD_SIZE/2, r:14, angle:0,
     name, color:"#3aa3ff",
     hp:100, maxHp:100, speed:220, alive:true, isPlayer:true,
+    armor: 0, maxArmor: 100,
     weapons: { pistol: { ammo: WEAPONS.pistol.mag, owned:true } },
     current: "pistol", reloading:false, reloadEnd:0, fireCD:0,
     materials: 100,
@@ -306,9 +309,15 @@ function makeObstacles() {
 }
 function makePickups() {
   const arr=[]; let id=1;
-  for (let i=0;i<80;i++) {
+  for (let i=0;i<100;i++) {
     const r = Math.random();
-    const t = r<0.30?"heal":r<0.55?"ammo":r<0.72?"ar":r<0.87?"shotgun":"sniper";
+    let t;
+    if (r<0.22) t = "heal";
+    else if (r<0.38) t = "ammo";
+    else if (r<0.55) t = "armor";
+    else if (r<0.70) t = "ar";
+    else if (r<0.85) t = "shotgun";
+    else t = "sniper";
     arr.push({id:id++, x:rand(100,WORLD_SIZE-100), y:rand(100,WORLD_SIZE-100), type:t, r:12});
   }
   return arr;
@@ -586,6 +595,7 @@ function soloUpdate(dt) {
       const pk = s.pickups[i];
       if (dist2(p, pk) < (p.r+pk.r)**2) {
         if (pk.type==="heal") p.hp = Math.min(p.maxHp, p.hp+35);
+        else if (pk.type==="armor") p.armor = Math.min(p.maxArmor, p.armor + 50);
         else if (pk.type==="ammo") {
           const w=WEAPONS[p.current], inv=p.weapons[p.current];
           if (inv) inv.ammo = Math.min(w.mag, inv.ammo+Math.ceil(w.mag*0.6));
@@ -650,7 +660,12 @@ function soloUpdate(dt) {
         if (!t.alive || t===b.owner) continue;
         const dx=b.x-t.x, dy=b.y-t.y;
         if (dx*dx+dy*dy < t.r*t.r) {
-          t.hp -= b.dmg; spawnBlood(s, b.x, b.y); dead=true;
+          let dmg = b.dmg;
+          if (t.armor && t.armor > 0) {
+            const absorbed = Math.min(t.armor, dmg * 0.5);
+            t.armor -= absorbed; dmg -= absorbed;
+          }
+          t.hp -= dmg; spawnBlood(s, b.x, b.y); dead=true;
           Sounds.hit(panFor(t), distFor(t));
           if (t.hp<=0) {
             t.alive=false;
@@ -1009,6 +1024,7 @@ function getEntitiesForRender() {
       ents: [s.player, ...s.bots],
       bullets: s.bullets, pickups: s.pickups, obstacles: s.obstacles, particles: s.particles,
       walls: s.walls,
+      airdrops: s.airdrops || [],
       storm: s.storm,
       camX: s.player.x - canvas.width/2,
       camY: s.player.y - canvas.height/2,
