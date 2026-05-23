@@ -285,14 +285,12 @@ function collideObstacles(ent) {
 function toggleVehicle(p) {
   if (!p.alive) return;
   if (p.vehicleId) {
-    // выйти
     const v = vehicles.find(x => x.id === p.vehicleId);
     if (v) v.driver = null;
     p.vehicleId = null;
     return;
   }
-  // войти в ближайшую машину в радиусе 60px
-  let nearest=null, nd2=60*60;
+  let nearest=null, nd2=120*120;  // увеличил радиус с 60 до 120
   for (const v of vehicles) {
     if (v.hp<=0 || v.driver) continue;
     const dx=v.x-p.x, dy=v.y-p.y, d2=dx*dx+dy*dy;

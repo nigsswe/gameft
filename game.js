@@ -608,9 +608,10 @@ function soloToggleVehicle() {
     const v = s.vehicles.find(x => x.id === p.vehicleId);
     if (v) v.driver = null;
     p.vehicleId = null;
+    showMsg("Exited vehicle", "", false);
     return;
   }
-  let nearest=null, nd2=70*70;
+  let nearest=null, nd2=120*120;  // 120 px радиус (был 70) — легче сесть
   for (const v of s.vehicles) {
     if (v.hp<=0 || v.driver) continue;
     const dx=v.x-p.x, dy=v.y-p.y, d2=dx*dx+dy*dy;
@@ -620,6 +621,20 @@ function soloToggleVehicle() {
     nearest.driver = p;
     p.vehicleId = nearest.id;
     Sounds.uiClick();
+    showMsg("🚗 Driving!", "WASD двигает • E чтобы выйти", false);
+  } else {
+    // показать дистанцию до ближайшей машины
+    let closest=Infinity;
+    for (const v of s.vehicles) {
+      if (v.hp<=0) continue;
+      const d = Math.hypot(v.x-p.x, v.y-p.y);
+      if (d < closest) closest = d;
+    }
+    if (isFinite(closest)) {
+      showMsg("No vehicle near", `Closest: ${Math.round(closest)}px (need <120)`, false);
+    } else {
+      showMsg("No vehicles available", "", false);
+    }
   }
 }
 
