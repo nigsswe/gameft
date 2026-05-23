@@ -697,6 +697,36 @@ function soloUpdate(dt) {
     p2.x += p2.vx*dt; p2.y += p2.vy*dt; p2.vx*=0.9; p2.vy*=0.9; p2.life-=dt;
     if (p2.life<=0) s.particles.splice(i,1);
   }
+  // airdrops (Solo)
+  if (s.timer >= s.nextAirdrop) {
+    const r = s.storm.radius * 0.7;
+    const ang = Math.random()*TAU;
+    const d = Math.random() * r;
+    const x = clamp(s.storm.cx + Math.cos(ang)*d, 100, WORLD_SIZE-100);
+    const y = clamp(s.storm.cy + Math.sin(ang)*d, 100, WORLD_SIZE-100);
+    s.airdrops.push({ id:Date.now(), x, y, state:"falling", altitude:1.0 });
+    s.nextAirdrop = s.timer + 45;
+    addKillfeed("🪂 Airdrop incoming!");
+  }
+  for (let i=s.airdrops.length-1;i>=0;i--) {
+    const a = s.airdrops[i];
+    if (a.state === "falling") {
+      a.altitude -= dt / 5;
+      if (a.altitude <= 0) { a.altitude = 0; a.state = "landed"; }
+    } else if (a.state === "landed" && p.alive) {
+      const dx = p.x-a.x, dy = p.y-a.y;
+      if (dx*dx+dy*dy < (14+20)*(14+20)) {
+        const legendaries = ["minigun","rocket"];
+        const w = legendaries[Math.floor(Math.random()*legendaries.length)];
+        if (!p.weapons[w]) p.weapons[w] = { ammo:WEAPONS[w].mag, owned:true };
+        else p.weapons[w].ammo = WEAPONS[w].mag;
+        p.current = w; p.reloading = false; p.armor = p.maxArmor;
+        addKillfeed(`🎁 Picked up ${WEAPONS[w].name}!`);
+        s.airdrops.splice(i,1);
+        syncWeaponBar(p);
+      }
+    }
+  }
   // storm
   if (s.timer >= s.storm.nextShrink && s.storm.targetRadius > 80) {
     s.storm.stage++;
