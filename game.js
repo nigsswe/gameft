@@ -783,17 +783,18 @@ function startNetLoop() {
 }
 function sendInput() {
   if (!ws || ws.readyState!==1 || !snap) return;
-  // angle в мировых: нужно знать позицию своего игрока
   const meEnt = snap.players.find(p => p.id===myId);
   if (!meEnt) return;
   const wx = mouse.x + (meEnt.x - canvas.width/2);
   const wy = mouse.y + (meEnt.y - canvas.height/2);
   const angle = Math.atan2(wy-meEnt.y, wx-meEnt.x);
+  // В build-режиме НЕ стреляем — ЛКМ только ставит стену
+  const shouldShoot = mouse.down && !buildMode;
   ws.send(JSON.stringify({
     t:"input",
     input: {
       up: !!keys["w"], down: !!keys["s"], left: !!keys["a"], right: !!keys["d"],
-      sprint: !!keys["shift"], shoot: mouse.down, reload:false,
+      sprint: !!keys["shift"], shoot: shouldShoot, reload:false,
       angle,
     }
   }));
