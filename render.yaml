@@ -1,0 +1,10 @@
+# Render.com auto-config — после подключения репо Render сам всё настроит
+services:
+  - type: web
+    name: mini-battle-royale
+    runtime: node
+    plan: free
+    region: frankfurt  # ближе всего к Украине/России/EU
+    buildCommand: npm install
+    startCommand: node server.js
+    autoDeploy: true

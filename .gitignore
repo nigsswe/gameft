@@ -1,0 +1,10 @@
+node_modules/
+*.log
+*.err
+cf.log
+cf.err
+lt.log
+server.log
+server.err
+cloudflared.exe
+package-lock.json

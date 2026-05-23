@@ -1,0 +1,15 @@
+{
+  "name": "mini-battle-royale",
+  "version": "1.0.0",
+  "description": "2D Battle Royale in browser with multiplayer (Node.js + WebSocket)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
