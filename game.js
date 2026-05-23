@@ -656,23 +656,36 @@ function soloUpdate(dt) {
     const aimWY = mouse.y + (p.y - canvas.height/2);
     p.angle = Math.atan2(aimWY-p.y, aimWX-p.x);
     // === Вождение машины (Solo) ===
+    // WASD — это направление движения (как top-down arcade).
+    // Машина сама поворачивает в сторону куда едет, плавно (lerp).
     let inVehicle = false;
     if (p.vehicleId) {
       const v = s.vehicles.find(x => x.id === p.vehicleId);
       if (v && v.hp > 0) {
         inVehicle = true;
-        // Машина едет КУДА УГОЛ МАШИНЫ, а не куда смотрит игрок
-        // Угол меняется только при поворотах (A/D), мышь не рулит
-        const turn = (keys["d"]?1:0) - (keys["a"]?1:0);
-        v.angle += turn * 2.2 * dt;
-        const fwd = (keys["w"]?1:0) - (keys["s"]?1:0);
-        const VS = 260;  // более разумная скорость (было 460)
-        v.x += Math.cos(v.angle) * fwd * VS * dt;
-        v.y += Math.sin(v.angle) * fwd * VS * dt;
+        let mvx = 0, mvy = 0;
+        if (keys["w"]) mvy--;
+        if (keys["s"]) mvy++;
+        if (keys["a"]) mvx--;
+        if (keys["d"]) mvx++;
+        const mlen = Math.hypot(mvx, mvy);
+        const VS = 280;
+        if (mlen > 0) {
+          mvx /= mlen; mvy /= mlen;
+          v.x += mvx * VS * dt;
+          v.y += mvy * VS * dt;
+          // целевой угол = направление движения
+          const targetAng = Math.atan2(mvy, mvx);
+          // плавный поворот к цели (lerp по самому короткому пути)
+          let diff = targetAng - v.angle;
+          while (diff > Math.PI) diff -= 2*Math.PI;
+          while (diff < -Math.PI) diff += 2*Math.PI;
+          v.angle += diff * Math.min(1, dt * 8);  // быстрый поворот
+        }
         v.x = clamp(v.x, 30, WORLD_SIZE-30);
         v.y = clamp(v.y, 30, WORLD_SIZE-30);
-        // таран ботов (только при движении вперёд)
-        if (Math.abs(fwd) > 0) {
+        // таран ботов (только при движении)
+        if (mlen > 0) {
           for (const o of s.bots) {
             if (!o.alive) continue;
             const ddx=o.x-v.x, ddy=o.y-v.y;
@@ -689,7 +702,7 @@ function soloUpdate(dt) {
           }
         }
         p.x = v.x; p.y = v.y;
-        p.angle = v.angle;  // игрок смотрит туда же куда машина
+        p.angle = v.angle;
       } else { p.vehicleId = null; }
     }
     let speedMul = (keys["shift"]?1.5:1);
