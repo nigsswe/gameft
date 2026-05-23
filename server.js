@@ -50,6 +50,9 @@ const WEAPONS = {
   ar:      { name:"AR",      dmg:14, cooldown:0.11, mag:30, reload:1.8, spread:0.07, bulletSpeed:950, range:1.0 },
   shotgun: { name:"Shotgun", dmg:14, cooldown:0.75, mag:6,  reload:2.2, spread:0.20, bulletSpeed:800, range:0.6, pellets:7 },
   sniper:  { name:"Sniper",  dmg:75, cooldown:1.20, mag:5,  reload:2.8, spread:0.005, bulletSpeed:1500, range:1.5 },
+  // ЛЕГЕНДАРНЫЕ (только из airdrop)
+  minigun: { name:"Minigun", dmg:9,  cooldown:0.04, mag:100, reload:3.5, spread:0.10, bulletSpeed:1100, range:1.0, legendary:true },
+  rocket:  { name:"Rocket",  dmg:90, cooldown:1.50, mag:3,  reload:3.0, spread:0.0,  bulletSpeed:600, range:2.0, legendary:true, explosive:true },
 };
 
 const WALL_SIZE = 60;
@@ -59,6 +62,10 @@ const STRUCTURES = {
   floor: { cost:5,  hp:40, blocksMove:false, blocksBullets:false, speedMod:1.2 },
   ramp:  { cost:15, hp:60, blocksMove:false, blocksBullets:true,  speedMod:1.0 },
 };
+
+// === Vehicles ===
+const VEHICLE_SPEED = 460;
+const VEHICLE_HP = 200;
 
 const rand = (a,b) => a + Math.random()*(b-a);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
@@ -71,6 +78,8 @@ let bullets = [];
 let pickups = [];
 let obstacles = [];        // создаётся ниже сразу
 let walls = [];
+let vehicles = [];
+let airdrops = [];
 let killfeed = [];
 let phase = "lobby";       // lobby | countdown | playing | ended
 let countdown = 0;
@@ -85,17 +94,54 @@ function makeObstacles() {
 }
 function makePickups() {
   const arr = [];
-  for (let i=0;i<80;i++) {
+  for (let i=0;i<100;i++) {
     const t = Math.random();
+    let type;
+    if (t<0.25) type = "heal";
+    else if (t<0.40) type = "ammo";
+    else if (t<0.55) type = "armor";  // НОВОЕ: щит/броня
+    else if (t<0.70) type = "ar";
+    else if (t<0.83) type = "shotgun";
+    else type = "sniper";
+    arr.push({ id: nextId++, x: rand(100, WORLD_SIZE-100), y: rand(100, WORLD_SIZE-100), type, r: 12 });
+  }
+  return arr;
+}
+
+// === Vehicles spawn ===
+function makeVehicles() {
+  const arr = [];
+  for (let i=0;i<8;i++) {
     arr.push({
       id: nextId++,
-      x: rand(100, WORLD_SIZE-100),
-      y: rand(100, WORLD_SIZE-100),
-      type: t<0.35 ? "heal" : t<0.55 ? "ammo" : t<0.7 ? "ar" : t<0.83 ? "shotgun" : "sniper",
-      r: 12,
+      x: rand(300, WORLD_SIZE-300),
+      y: rand(300, WORLD_SIZE-300),
+      angle: rand(0, TAU),
+      hp: VEHICLE_HP, maxHp: VEHICLE_HP,
+      driver: null,
     });
   }
   return arr;
+}
+
+// === Airdrops ===
+let nextAirdropTime = 0;
+const AIRDROP_INTERVAL = 45; // секунд между дропами
+function spawnAirdrop() {
+  // выбираем точку внутри текущей зоны
+  const r = storm ? storm.radius * 0.7 : WORLD_SIZE*0.4;
+  const cx = storm ? storm.cx : WORLD_SIZE/2;
+  const cy = storm ? storm.cy : WORLD_SIZE/2;
+  const ang = Math.random()*TAU;
+  const d = Math.random() * r;
+  const x = Math.max(100, Math.min(WORLD_SIZE-100, cx + Math.cos(ang)*d));
+  const y = Math.max(100, Math.min(WORLD_SIZE-100, cy + Math.sin(ang)*d));
+  airdrops.push({
+    id: nextId++, x, y,
+    state: "falling",   // falling -> landed
+    fallEnd: timeNow + 5,
+    altitude: 1.0,
+  });
 }
 function newStorm() {
   return {
@@ -123,11 +169,16 @@ function resetWorld() {
     p.x = WORLD_SIZE/2 + Math.cos(a)*R;
     p.y = WORLD_SIZE/2 + Math.sin(a)*R;
     p.hp = 100; p.alive = true; p.kills = 0; p.spectator = false;
+    p.armor = 0; p.maxArmor = 100;
     p.weapons = { pistol: { ammo: WEAPONS.pistol.mag, owned:true } };
     p.current = "pistol";
     p.reloading = false; p.reloadEnd = 0; p.fireCD = 0;
     p.materials = 100;
+    p.vehicleId = null;
   });
+  vehicles = makeVehicles();
+  airdrops = [];
+  nextAirdropTime = timeNow + 30;  // первый дроп через 30 сек
   waitingQueue = [];
 }
 
@@ -153,12 +204,14 @@ wss.on("connection", (ws) => {
     id, ws, name: "Player"+id,
     x: WORLD_SIZE/2, y: WORLD_SIZE/2, angle: 0,
     hp: 100, alive: !spectating, kills: 0, spectator: spectating,
+    armor: 0, maxArmor: 100,
     color: `hsl(${(id*67)%360},70%,55%)`,
     weapons: { pistol: { ammo: WEAPONS.pistol.mag, owned:true } },
     current: "pistol",
     reloading: false, reloadEnd: 0, fireCD: 0,
     materials: 100,
-    input: { up:false, down:false, left:false, right:false, sprint:false, shoot:false, reload:false, angle:0 },
+    vehicleId: null,
+    input: { up:false, down:false, left:false, right:false, sprint:false, shoot:false, reload:false, angle:0, action:false },
     lastSeen: Date.now(),
   };
   players.set(id, p);
@@ -188,6 +241,9 @@ wss.on("connection", (ws) => {
       tryReload(p);
     } else if (m.t === "build") {
       tryBuild(p, m.btype);
+    } else if (m.t === "use") {
+      // E — войти/выйти из машины
+      toggleVehicle(p);
     }
   });
 
@@ -224,6 +280,28 @@ function collideObstacles(ent) {
   }
   ent.x = clamp(ent.x, 14, WORLD_SIZE-14);
   ent.y = clamp(ent.y, 14, WORLD_SIZE-14);
+}
+
+function toggleVehicle(p) {
+  if (!p.alive) return;
+  if (p.vehicleId) {
+    // выйти
+    const v = vehicles.find(x => x.id === p.vehicleId);
+    if (v) v.driver = null;
+    p.vehicleId = null;
+    return;
+  }
+  // войти в ближайшую машину в радиусе 60px
+  let nearest=null, nd2=60*60;
+  for (const v of vehicles) {
+    if (v.hp<=0 || v.driver) continue;
+    const dx=v.x-p.x, dy=v.y-p.y, d2=dx*dx+dy*dy;
+    if (d2<nd2) { nearest=v; nd2=d2; }
+  }
+  if (nearest) {
+    nearest.driver = p.id;
+    p.vehicleId = nearest.id;
+  }
 }
 
 function tryBuild(p, btype) {
@@ -298,12 +376,42 @@ function updatePlayer(p, dt) {
   if (p.input.right) dx++;
   const len = Math.hypot(dx,dy);
   if (len>0) { dx/=len; dy/=len; }
+  p.angle = p.input.angle;
+
+  // Если игрок в машине — двигаем машину, синхронизируем позицию игрока
+  if (p.vehicleId) {
+    const v = vehicles.find(x => x.id === p.vehicleId);
+    if (v && v.hp > 0) {
+      v.angle = p.angle;
+      // движение по углу мыши (рулим мышью)
+      const fwd = (p.input.up ? 1 : 0) - (p.input.down ? 1 : 0);
+      const strafe = (p.input.right ? 1 : 0) - (p.input.left ? 1 : 0);
+      v.x += (Math.cos(v.angle)*fwd + Math.cos(v.angle+Math.PI/2)*strafe) * VEHICLE_SPEED * dt;
+      v.y += (Math.sin(v.angle)*fwd + Math.sin(v.angle+Math.PI/2)*strafe) * VEHICLE_SPEED * dt;
+      v.x = clamp(v.x, 30, WORLD_SIZE-30);
+      v.y = clamp(v.y, 30, WORLD_SIZE-30);
+      // машина таранит и наносит урон
+      for (const o of players.values()) {
+        if (o === p || !o.alive || o.vehicleId) continue;
+        const ddx=o.x-v.x, ddy=o.y-v.y;
+        if (ddx*ddx+ddy*ddy < 40*40) {
+          o.hp -= 35;
+          if (o.hp <= 0) killPlayer(o, p, "ram");
+        }
+      }
+      p.x = v.x; p.y = v.y;
+      if (p.fireCD > 0) p.fireCD -= dt;
+      return; // в машине не стреляешь и не подбираешь pickups
+    } else {
+      p.vehicleId = null;  // машина разрушена
+    }
+  }
+
   let mul = (p.input.sprint?1.5:1);
   const fl = floorUnder(p.x, p.y);
   if (fl) mul *= STRUCTURES[fl.type].speedMod;
   const sp = mul * 220;
   p.x += dx*sp*dt; p.y += dy*sp*dt;
-  p.angle = p.input.angle;
 
   if (p.input.shoot) shoot(p);
   if (p.input.reload) { tryReload(p); p.input.reload = false; }
@@ -320,8 +428,8 @@ function updatePlayer(p, dt) {
     const ddx=p.x-pk.x, ddy=p.y-pk.y;
     if (ddx*ddx+ddy*ddy < (14+pk.r)*(14+pk.r)) {
       if (pk.type === "heal") p.hp = Math.min(100, p.hp+35);
+      else if (pk.type === "armor") p.armor = Math.min(p.maxArmor, p.armor + 50);
       else if (pk.type === "ammo") {
-        // даём патронов в текущее оружие
         const w = WEAPONS[p.current], inv = p.weapons[p.current];
         if (inv) inv.ammo = Math.min(w.mag, inv.ammo + Math.ceil(w.mag*0.6));
       } else if (WEAPONS[pk.type]) {
@@ -330,6 +438,21 @@ function updatePlayer(p, dt) {
         p.current = pk.type; p.reloading = false;
       }
       pickups.splice(i,1);
+    }
+  }
+  // airdrops (только приземлившиеся можно подобрать)
+  for (let i=airdrops.length-1;i>=0;i--) {
+    const a = airdrops[i];
+    if (a.state !== "landed") continue;
+    const ddx=p.x-a.x, ddy=p.y-a.y;
+    if (ddx*ddx+ddy*ddy < (14+20)*(14+20)) {
+      // даём легендарное оружие
+      const legendaries = ["minigun", "rocket"];
+      const w = legendaries[Math.floor(Math.random()*legendaries.length)];
+      p.weapons[w] = { ammo: WEAPONS[w].mag, owned:true };
+      p.current = w; p.reloading = false;
+      p.armor = p.maxArmor; // полная броня
+      airdrops.splice(i,1);
     }
   }
 
@@ -375,12 +498,34 @@ function updateBullets(dt) {
         }
       }
     }
+    // машины ловят пули
+    if (!dead) {
+      for (const v of vehicles) {
+        if (v.hp<=0) continue;
+        const dx=b.x-v.x, dy=b.y-v.y;
+        if (dx*dx+dy*dy < 28*28) {
+          v.hp -= b.dmg; dead=true;
+          if (v.hp<=0 && v.driver) {
+            const drv = players.get(v.driver);
+            if (drv) { drv.vehicleId = null; drv.hp -= 30; if (drv.hp<=0) killPlayer(drv, null, "explosion"); }
+          }
+          break;
+        }
+      }
+    }
     if (!dead) {
       for (const p of players.values()) {
         if (!p.alive || p.id === b.owner) continue;
         const dx=b.x-p.x, dy=b.y-p.y;
         if (dx*dx+dy*dy < 14*14) {
-          p.hp -= b.dmg; dead=true;
+          // броня поглощает половину урона
+          let dmg = b.dmg;
+          if (p.armor > 0) {
+            const absorbed = Math.min(p.armor, dmg * 0.5);
+            p.armor -= absorbed;
+            dmg -= absorbed;
+          }
+          p.hp -= dmg; dead=true;
           if (p.hp <= 0) {
             killPlayer(p, players.get(b.owner));
             const killer = players.get(b.owner);
@@ -393,6 +538,7 @@ function updateBullets(dt) {
     if (dead) bullets.splice(i,1);
   }
   walls = walls.filter(w => w.hp > 0);
+  vehicles = vehicles.filter(v => v.hp > 0);
 }
 
 function updateStorm(dt) {
@@ -447,6 +593,18 @@ setInterval(() => {
     for (const p of players.values()) updatePlayer(p, dt);
     updateBullets(dt);
     updateStorm(dt);
+    // airdrops tick
+    if (timeNow >= nextAirdropTime) {
+      spawnAirdrop();
+      nextAirdropTime = timeNow + AIRDROP_INTERVAL;
+      broadcast({ t:"event", msg:"🪂 Airdrop incoming!" });
+    }
+    for (const a of airdrops) {
+      if (a.state === "falling") {
+        a.altitude -= dt / 5;  // 5 секунд падения
+        if (a.altitude <= 0) { a.altitude = 0; a.state = "landed"; }
+      }
+    }
     const alive = [...players.values()].filter(p=>p.alive);
     if (alive.length <= 1 && players.size >= 2) {
       phase = "ended";
@@ -495,17 +653,33 @@ setInterval(() => {
       if (dx*dx+dy*dy > R2) continue;
       ws_.push({ x:w.x, y:w.y, hp:w.hp|0, mh:w.maxHp, ty:w.type });
     }
+    // машины и airdrops в радиусе
+    const vs = [];
+    for (let i=0;i<vehicles.length;i++) {
+      const v = vehicles[i];
+      const dx=v.x-cx, dy=v.y-cy;
+      if (dx*dx+dy*dy > R2) continue;
+      vs.push({ id:v.id, x:v.x|0, y:v.y|0, a:Math.round(v.angle*100)/100, hp:v.hp|0, mh:v.maxHp, dr:v.driver });
+    }
+    const ads = [];
+    for (let i=0;i<airdrops.length;i++) {
+      const a = airdrops[i];
+      const dx=a.x-cx, dy=a.y-cy;
+      if (dx*dx+dy*dy > R2) continue;
+      ads.push({ id:a.id, x:a.x|0, y:a.y|0, s:a.state, al:Math.round(a.altitude*100)/100 });
+    }
     const msg = {
-      t:"s",  // короткий тип
+      t:"s",
       ph: phase, cd: Math.ceil(countdown),
-      ps, bs, pks, ws: ws_,
+      ps, bs, pks, ws: ws_, vs, ads,
       st: stormObj,
       kf: killfeed,
       me: {
-        hp:p.hp|0,
+        hp:p.hp|0, ar:p.armor|0, mar:p.maxArmor,
         we: p.weapons, c: p.current, rl: p.reloading,
         rL: p.reloading ? Math.round((p.reloadEnd - timeNow)*100)/100 : 0,
         k: p.kills, al: p.alive, ma: p.materials||0,
+        vi: p.vehicleId,
       },
     };
     p.ws.send(JSON.stringify(msg));

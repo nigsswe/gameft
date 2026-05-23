@@ -74,6 +74,8 @@ const WEAPONS = {
   ar:      { key:"2", name:"AR",      emoji:"🎯", dmg:14, cooldown:0.11, mag:30, reload:1.8, spread:0.07, bulletSpeed:950, range:1.0 },
   shotgun: { key:"3", name:"Shotgun", emoji:"💥", dmg:14, cooldown:0.75, mag:6,  reload:2.2, spread:0.20, bulletSpeed:800, range:0.6, pellets:7 },
   sniper:  { key:"4", name:"Sniper",  emoji:"🎯", dmg:75, cooldown:1.20, mag:5,  reload:2.8, spread:0.005, bulletSpeed:1500, range:1.5 },
+  minigun: { key:"5", name:"Minigun", emoji:"⚡", dmg:9,  cooldown:0.04, mag:100,reload:3.5, spread:0.10, bulletSpeed:1100, range:1.0, legendary:true },
+  rocket:  { key:"6", name:"Rocket",  emoji:"🚀", dmg:90, cooldown:1.50, mag:3,  reload:3.0, spread:0.0,  bulletSpeed:600, range:2.0, legendary:true },
 };
 const WEAPON_ORDER = ["pistol","ar","shotgun","sniper"];
 
@@ -94,7 +96,7 @@ const mouse = { x: window.innerWidth/2, y: window.innerHeight/2, down:false, rdo
 
 // Маппинг физических кодов -> логических имён, которые читает движок
 const KEY_MAP = {
-  "KeyW":"w","KeyA":"a","KeyS":"s","KeyD":"d","KeyR":"r","KeyQ":"q","KeyM":"m",
+  "KeyW":"w","KeyA":"a","KeyS":"s","KeyD":"d","KeyR":"r","KeyQ":"q","KeyM":"m","KeyE":"e",
   "ShiftLeft":"shift","ShiftRight":"shift",
   "ArrowUp":"w","ArrowDown":"s","ArrowLeft":"a","ArrowRight":"d",
   "Digit1":"1","Digit2":"2","Digit3":"3","Digit4":"4",
@@ -161,6 +163,10 @@ window.addEventListener("keydown", e => {
     if (k === "m" || (e.key && e.key.toLowerCase()==="m")) { toggleMute(); }
     if (e.key && e.key.toLowerCase()==="b") { cycleBuildType(); e.preventDefault(); }
     if (e.key && e.key.toLowerCase()==="n") { toggleMusic(); }
+    if (e.key && e.key.toLowerCase()==="e") {
+      // E — войти/выйти из машины (только MP)
+      if (isMultiplayer && ws && ws.readyState===1) ws.send(JSON.stringify({ t:"use" }));
+    }
     if (e.key === "F1") { setBuildType("wall"); e.preventDefault(); }
     if (e.key === "F2") { setBuildType("floor"); e.preventDefault(); }
     if (e.key === "F3") { setBuildType("ramp"); e.preventDefault(); }
@@ -216,6 +222,11 @@ let prevSnap = null;              // предыдущий snapshot (для ин�
 let prevSnapTime = 0;
 let currSnapTime = 0;
 const INTERP_DELAY = 100;         // мс задержки рендера для плавной интерполяции
+
+// === Client-side prediction state ===
+// Мгновенно двигаем своего игрока локально на основе input, не дожидаясь ответа сервера
+let predictedX = 0, predictedY = 0;
+let predictedInit = false;
 let timeNow = 0;
 let killfeedItems = [];
 
@@ -703,8 +714,9 @@ function soloUpdate(dt) {
 // =====================================================================
 function startMP(url, name) {
   isMultiplayer = true;
-  bgRendered = false;  // reset для свежих obstacles из welcome
+  bgRendered = false;
   lastObstacles = null;
+  predictedInit = false;
   statusEl.textContent = "Connecting...";
   try { ws = new WebSocket(url); }
   catch(e) { statusEl.textContent = "❌ Bad URL"; statusEl.classList.add("err"); return; }
@@ -733,6 +745,8 @@ function startMP(url, name) {
       const norm = {
         phase: m.ph || m.phase,
         countdown: m.cd != null ? m.cd : m.countdown,
+        vehicles: m.vs || [],
+        airdrops: m.ads || [],
         players: (m.ps || m.players || []).map(p => ({
           id: p.id, n: p.n, x: p.x, y: p.y, a: p.a, hp: p.hp,
           al: p.al, k: p.k || 0, c: p.c, w: p.w, rl: p.rl,
@@ -759,12 +773,15 @@ function startMP(url, name) {
       const meRaw = m.me || {};
       const meNorm = {
         hp: meRaw.hp,
+        armor: meRaw.ar || 0,
+        maxArmor: meRaw.mar || 100,
         weapons: meRaw.we || meRaw.weapons,
         current: meRaw.c || meRaw.current,
         reloading: meRaw.rl != null ? meRaw.rl : meRaw.reloading,
         kills: meRaw.k != null ? meRaw.k : meRaw.kills,
         alive: meRaw.al != null ? meRaw.al : meRaw.alive,
         materials: meRaw.ma != null ? meRaw.ma : meRaw.materials,
+        vehicleId: meRaw.vi || null,
       };
       prevSnap = snap;
       prevSnapTime = currSnapTime || performance.now();
@@ -828,7 +845,7 @@ function updateMPHud() {
   const now = performance.now();
   if (now - lastHudUpdate < 200) return;
   lastHudUpdate = now;
-  hpEl.textContent = me.hp;
+  hpEl.textContent = me.hp + (me.armor > 0 ? ` (+🛡${me.armor})` : "");
   killsEl.textContent = me.kills;
   let aliveN = 0;
   for (const p of snap.players) if (p.al) aliveN++;
@@ -907,14 +924,12 @@ function hideMenu() {
 function getEntitiesForRender() {
   if (isMultiplayer) {
     if (!snap) return { ents: [], bullets: [], pickups: [], obstacles: [], storm: null, camX:0, camY:0, alive:true };
-    // Интерполяция: рендерим состояние между prevSnap и snap
     let interpT = 1;
     if (prevSnap && currSnapTime > prevSnapTime) {
       const renderTime = performance.now() - INTERP_DELAY;
       interpT = (renderTime - prevSnapTime) / (currSnapTime - prevSnapTime);
       interpT = Math.max(0, Math.min(1, interpT));
     }
-    // Строим интерполированных игроков
     const prevById = {};
     if (prevSnap) for (const p of prevSnap.players) prevById[p.id] = p;
     const interpPlayers = snap.players.map(p => {
@@ -927,7 +942,37 @@ function getEntitiesForRender() {
         a: pp.a + ((p.a - pp.a + Math.PI*3) % (Math.PI*2) - Math.PI) * interpT,
       };
     });
-    const meEnt = interpPlayers.find(p=>p.id===myId);
+    // === Client-side prediction для своего игрока ===
+    // Заменяем серверную позицию на локально предсказанную (для мгновенного отклика)
+    const meEntServer = interpPlayers.find(p => p.id === myId);
+    if (meEntServer && me && me.alive) {
+      // инициализация позиции при первом получении себя
+      if (!predictedInit) {
+        predictedX = meEntServer.x;
+        predictedY = meEntServer.y;
+        predictedInit = true;
+      }
+      // плавная коррекция к серверной позиции (если расхождение большое — резко)
+      const dx = meEntServer.x - predictedX;
+      const dy = meEntServer.y - predictedY;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 80) {
+        // teleport (телепорт или серьёзная рассинхронизация)
+        predictedX = meEntServer.x;
+        predictedY = meEntServer.y;
+      } else if (dist > 1) {
+        // плавно подтягиваемся (20% за кадр)
+        predictedX += dx * 0.2;
+        predictedY += dy * 0.2;
+      }
+      meEntServer.x = predictedX;
+      meEntServer.y = predictedY;
+      // целимся в направлении мыши (всегда мгновенно — без серверной задержки)
+      const aimWX = mouse.x + (predictedX - canvas.width/2);
+      const aimWY = mouse.y + (predictedY - canvas.height/2);
+      meEntServer.a = Math.atan2(aimWY - predictedY, aimWX - predictedX);
+    }
+    const meEnt = meEntServer;
     const camTarget = meEnt || { x: WORLD_SIZE/2, y: WORLD_SIZE/2 };
     // строим объект игрока для зум-проверки / превью стройки
     let myPlayer = null;
@@ -947,6 +992,8 @@ function getEntitiesForRender() {
       })),
       bullets: snap.bullets,
       pickups: snap.pickups,
+      vehicles: snap.vehicles || [],
+      airdrops: snap.airdrops || [],
       walls: snap.walls || [],
       obstacles: snap.obstacles,
       storm: snap.storm ? { cx:snap.storm.cx, cy:snap.storm.cy, radius:snap.storm.r, targetRadius:snap.storm.tr } : null,
@@ -1095,6 +1142,19 @@ function draw() {
       ctx.strokeStyle="#7a5a30"; ctx.lineWidth=1; ctx.strokeRect(p.x-7,p.y-7,14,14);
       ctx.fillStyle="#000"; ctx.font = "bold 9px monospace"; ctx.textAlign="center";
       ctx.fillText("M", p.x, p.y+3);
+    } else if (p.type==="armor") {
+      // синий щит
+      ctx.fillStyle = "#3498db";
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y-9);
+      ctx.lineTo(p.x+8, p.y-5);
+      ctx.lineTo(p.x+6, p.y+8);
+      ctx.lineTo(p.x, p.y+10);
+      ctx.lineTo(p.x-6, p.y+8);
+      ctx.lineTo(p.x-8, p.y-5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.stroke();
     } else {
       // weapon pickup
       const colors = { ar:"#e67e22", shotgun:"#c0392b", sniper:"#8e44ad" };
@@ -1222,6 +1282,86 @@ function draw() {
       ctx.fillStyle = e.isPlayer ? "#aaddff" : "#fff";
       ctx.font = "bold 11px Arial"; ctx.textAlign="center";
       ctx.fillText(e.name, e.x, e.y-e.r-16);
+    }
+  }
+
+  // vehicles
+  if (R.vehicles) {
+    for (const v of R.vehicles) {
+      if (!inView(v.x, v.y, 35)) continue;
+      ctx.save();
+      ctx.translate(v.x, v.y);
+      ctx.rotate(v.a);
+      // тень
+      ctx.fillStyle = "rgba(0,0,0,0.4)";
+      ctx.fillRect(-25, -16, 50, 32);
+      // тело машины
+      ctx.fillStyle = "#cc3333";
+      ctx.fillRect(-24, -15, 48, 30);
+      // капот (передняя часть светлее)
+      ctx.fillStyle = "#ee5555";
+      ctx.fillRect(8, -12, 14, 24);
+      // окна
+      ctx.fillStyle = "#222";
+      ctx.fillRect(-12, -10, 18, 20);
+      // колёса
+      ctx.fillStyle = "#111";
+      ctx.fillRect(-20, -18, 8, 5);
+      ctx.fillRect(-20, 13, 8, 5);
+      ctx.fillRect(12, -18, 8, 5);
+      ctx.fillRect(12, 13, 8, 5);
+      ctx.restore();
+      // hp бар
+      const ratio = v.hp / v.mh;
+      ctx.fillStyle = "rgba(0,0,0,0.7)";
+      ctx.fillRect(v.x-25, v.y-32, 50, 5);
+      ctx.fillStyle = ratio>0.5 ? "#2ecc71" : ratio>0.25 ? "#f1c40f" : "#e74c3c";
+      ctx.fillRect(v.x-25, v.y-32, 50*ratio, 5);
+      // подсказка "E"
+      if (!v.dr && me && me.alive && Math.hypot(R.player.x-v.x, R.player.y-v.y) < 80) {
+        ctx.fillStyle = "#ffcc33";
+        ctx.font = "bold 14px Arial"; ctx.textAlign = "center";
+        ctx.fillText("[E] DRIVE", v.x, v.y-40);
+      }
+    }
+  }
+
+  // airdrops
+  if (R.airdrops) {
+    for (const a of R.airdrops) {
+      if (!inView(a.x, a.y, 30)) continue;
+      // приземлённый = сундук
+      if (a.s === "landed") {
+        ctx.fillStyle = "rgba(0,0,0,0.4)";
+        ctx.fillRect(a.x-18, a.y-13, 36, 26);
+        ctx.fillStyle = "#cc8800";
+        ctx.fillRect(a.x-16, a.y-12, 32, 24);
+        ctx.fillStyle = "#ffcc33";
+        ctx.fillRect(a.x-16, a.y-2, 32, 4);
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 10px monospace"; ctx.textAlign = "center";
+        ctx.fillText("LOOT", a.x, a.y+12);
+      } else {
+        // падающий — рисуем парашют выше
+        const yOff = -100 * a.al;
+        // тень-цель на земле (мигает)
+        const blink = (Math.floor(performance.now()/200) % 2) ? "rgba(255,80,80,0.5)" : "rgba(255,200,100,0.3)";
+        ctx.strokeStyle = blink; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(a.x, a.y, 40, 0, TAU); ctx.stroke();
+        // ящик
+        ctx.fillStyle = "#cc8800";
+        ctx.fillRect(a.x-12, a.y+yOff-8, 24, 16);
+        // парашют
+        ctx.fillStyle = "#ffcc33";
+        ctx.beginPath();
+        ctx.arc(a.x, a.y+yOff-14, 22, Math.PI, 0);
+        ctx.fill();
+        ctx.strokeStyle = "#cc8800"; ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(a.x-20, a.y+yOff-12); ctx.lineTo(a.x-8, a.y+yOff-2);
+        ctx.moveTo(a.x+20, a.y+yOff-12); ctx.lineTo(a.x+8, a.y+yOff-2);
+        ctx.stroke();
+      }
     }
   }
 
@@ -1395,8 +1535,23 @@ function loop(now) {
       }
     }
   } else {
+    // Client-side prediction: двигаем своего игрока локально каждый кадр
+    if (predictedInit && me && me.alive) {
+      let dx=0, dy=0;
+      if (keys["w"]) dy--; if (keys["s"]) dy++;
+      if (keys["a"]) dx--; if (keys["d"]) dx++;
+      const len = Math.hypot(dx,dy);
+      if (len>0) { dx/=len; dy/=len; }
+      const sp = (keys["shift"]?1.5:1) * 220;
+      predictedX += dx * sp * dt;
+      predictedY += dy * sp * dt;
+      // границы карты
+      predictedX = Math.max(14, Math.min(WORLD_SIZE-14, predictedX));
+      predictedY = Math.max(14, Math.min(WORLD_SIZE-14, predictedY));
+    }
+    // Отправка input на сервер 30 раз/сек
     netInputTimer += dt;
-    if (netInputTimer > 1/20) { netInputTimer = 0; sendInput(); }
+    if (netInputTimer > 1/30) { netInputTimer = 0; sendInput(); }
   }
   draw();
   fpsFrames++;
