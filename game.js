@@ -365,6 +365,33 @@ function collideObstacles(ent, obstacles, walls) {
       ent.x += (dx/d)*(rr-d); ent.y += (dy/d)*(rr-d);
     }
   }
+  // BUILDINGS (стены 4 штуки на каждое здание + дверной проём)
+  const bds = worldBuildings || [];
+  for (const bd of bds) {
+    // дверь на нижней стороне, ширина 24px по центру
+    const doorX1 = bd.x - 12, doorX2 = bd.x + 12;
+    // 4 стены: top, bottom (с дырой-дверью), left, right
+    const walls4 = [
+      {x1: bd.x-bd.w/2, y1: bd.y-bd.h/2, x2: bd.x+bd.w/2, y2: bd.y-bd.h/2+4},  // top
+      {x1: bd.x-bd.w/2, y1: bd.y-bd.h/2, x2: bd.x-bd.w/2+4, y2: bd.y+bd.h/2},  // left
+      {x1: bd.x+bd.w/2-4, y1: bd.y-bd.h/2, x2: bd.x+bd.w/2, y2: bd.y+bd.h/2},  // right
+      // bottom - две части: до двери и после
+      {x1: bd.x-bd.w/2, y1: bd.y+bd.h/2-4, x2: doorX1, y2: bd.y+bd.h/2},
+      {x1: doorX2, y1: bd.y+bd.h/2-4, x2: bd.x+bd.w/2, y2: bd.y+bd.h/2},
+    ];
+    for (const w of walls4) {
+      // AABB collision со стеной игрока (круг)
+      const cx = clamp(ent.x, w.x1, w.x2);
+      const cy = clamp(ent.y, w.y1, w.y2);
+      const dx = ent.x - cx, dy = ent.y - cy;
+      const d2 = dx*dx + dy*dy;
+      if (d2 < ent.r*ent.r && d2 > 0.0001) {
+        const d = Math.sqrt(d2);
+        ent.x += (dx/d)*(ent.r - d);
+        ent.y += (dy/d)*(ent.r - d);
+      }
+    }
+  }
   // walls (квадратные AABB) — только если blocksMove
   if (walls) {
     for (const w of walls) {
@@ -779,7 +806,26 @@ function soloUpdate(dt) {
         if (dx*dx+dy*dy < o.r*o.r) { dead=true; break; }
       }
     }
-    // walls
+    // здания (стены блокируют пули, окна — нет)
+    if (!dead && worldBuildings) {
+      for (const bd of worldBuildings) {
+        const halfW = bd.w/2, halfH = bd.h/2;
+        // быстрая проверка bbox
+        if (Math.abs(b.x - bd.x) > halfW || Math.abs(b.y - bd.y) > halfH) continue;
+        // внутри прямоугольника здания — проверяем близость к стене (4px)
+        const distToLeft = b.x - (bd.x - halfW);
+        const distToRight = (bd.x + halfW) - b.x;
+        const distToTop = b.y - (bd.y - halfH);
+        const distToBottom = (bd.y + halfH) - b.y;
+        const minDist = Math.min(distToLeft, distToRight, distToTop, distToBottom);
+        if (minDist < 5) {
+          // в зоне стены — проверяем не в окне ли (окна по 14px каждые ~50px на верх/низ)
+          const inDoor = (b.y > bd.y + halfH - 22 && b.x > bd.x - 12 && b.x < bd.x + 12);
+          if (!inDoor) { dead = true; break; }
+        }
+      }
+    }
+    // walls (built)
     if (!dead) {
       const wall = bulletHitsWall(b, s.walls);
       if (wall) {
@@ -1221,6 +1267,26 @@ let bgRendered = false;
 // BG_SCALE — фоновая текстура рисуется в меньшем разрешении и потом растягивается.
 // Это снижает потребление видеопамяти в SCALE^2 раз и ускоряет drawImage на интегр. GPU.
 const BG_SCALE = 0.5;  // 4000*0.5 = 2000px → ~4M пикселей вместо 16M
+// === BIOMES ===
+// Карта 4000×4000 разделена на 4 биома (квадранты):
+//   ↖ FOREST (зелёный лес)   ↗ DESERT (песок)
+//   ↙ SNOW (снег)            ↘ CITY (асфальт + здания)
+function biomeAt(x, y) {
+  const halfW = WORLD_SIZE / 2;
+  const isLeft = x < halfW;
+  const isTop = y < halfW;
+  if (isLeft && isTop) return "forest";
+  if (!isLeft && isTop) return "desert";
+  if (isLeft && !isTop) return "snow";
+  return "city";
+}
+const BIOME_COLORS = {
+  forest: { base:[55,110,55], dark:[30,70,30], light:[100,160,80] },
+  desert: { base:[200,180,110], dark:[160,140,80], light:[230,210,140] },
+  snow:   { base:[220,230,240], dark:[180,200,220], light:[255,255,255] },
+  city:   { base:[100,100,105], dark:[60,60,65],   light:[140,140,145] },
+};
+
 function buildBackground(obstacles) {
   if (!obstacles || obstacles.length === 0) return;
   bgCanvas = document.createElement("canvas");
@@ -1229,89 +1295,197 @@ function buildBackground(obstacles) {
   const bg = bgCanvas.getContext("2d", { alpha: false });
   bg.scale(BG_SCALE, BG_SCALE);
 
-  // === MINECRAFT-STYLE GRASS BLOCKS ===
-  // Базовый тёмно-зелёный фон
-  bg.fillStyle = "#3d6b2f";
-  bg.fillRect(0, 0, WORLD_SIZE, WORLD_SIZE);
-
   // Псевдо-случайный хеш для детерминированного шума
   function h(x, y) {
     const v = Math.sin(x*12.9898 + y*78.233) * 43758.5453;
     return v - Math.floor(v);
   }
-  const BS = 40; // размер блока
+  const BS = 40;
+  // === MINECRAFT-STYLE BLOCKS с биомами ===
   for (let y=0; y<WORLD_SIZE; y+=BS) {
     for (let x=0; x<WORLD_SIZE; x+=BS) {
+      const biome = biomeAt(x + BS/2, y + BS/2);
+      const colors = BIOME_COLORS[biome];
       const n = h(x/BS, y/BS);
-      // вариация цвета травы
-      const shade = Math.floor(n * 35);
-      const r = 55 + Math.floor(n*30);
-      const g = 100 + shade;
-      const b = 45 + Math.floor(n*15);
+      const shade = Math.floor(n * 30) - 15;
+      const r = Math.max(0, Math.min(255, colors.base[0] + shade));
+      const g = Math.max(0, Math.min(255, colors.base[1] + shade));
+      const b = Math.max(0, Math.min(255, colors.base[2] + shade));
       bg.fillStyle = `rgb(${r},${g},${b})`;
       bg.fillRect(x, y, BS, BS);
-      // Текстурные пиксели травы (тёмные точки)
-      const dots = 4 + Math.floor(n*4);
-      bg.fillStyle = `rgba(0,0,0,0.18)`;
-      for (let i=0; i<dots; i++) {
+      // тёмные точки (камешки/трава/песчинки)
+      const dotCount = biome === "city" ? 2 : 5;
+      bg.fillStyle = `rgba(${colors.dark[0]},${colors.dark[1]},${colors.dark[2]},0.45)`;
+      for (let i=0; i<dotCount; i++) {
         const dx = (h(x+i, y) * BS) | 0;
         const dy = (h(x, y+i*3) * BS) | 0;
-        bg.fillRect(x+dx, y+dy, 3, 3);
+        const sz = biome === "city" ? 4 : 2;
+        bg.fillRect(x+dx, y+dy, sz, sz);
       }
-      // Светлые блики
-      bg.fillStyle = `rgba(180,255,150,0.12)`;
+      // светлые блики
+      bg.fillStyle = `rgba(${colors.light[0]},${colors.light[1]},${colors.light[2]},0.25)`;
       for (let i=0; i<2; i++) {
         const dx = (h(x+i*7, y+3) * BS) | 0;
         const dy = (h(x+5, y+i*11) * BS) | 0;
         bg.fillRect(x+dx, y+dy, 2, 2);
       }
-      // тонкие границы блоков (как edges кубов в майнкрафте)
+      // CITY имеет линии разметки (дороги)
+      if (biome === "city") {
+        // тонкие полосы как дороги (каждые 200px)
+        if ((x % 200) < BS && x > 0) {
+          bg.fillStyle = "rgba(255,255,180,0.4)";
+          bg.fillRect(x, y+BS/2-1, BS, 2);
+        }
+        if ((y % 200) < BS && y > 0) {
+          bg.fillStyle = "rgba(255,255,180,0.4)";
+          bg.fillRect(x+BS/2-1, y, 2, BS);
+        }
+      }
+      // тонкие границы блоков
       bg.strokeStyle = "rgba(0,0,0,0.08)"; bg.lineWidth = 1;
       bg.strokeRect(x+0.5, y+0.5, BS-1, BS-1);
     }
   }
 
+  // === Границы биомов (тонкая линия перехода)
+  bg.strokeStyle = "rgba(255,255,255,0.15)"; bg.lineWidth = 4;
+  bg.beginPath();
+  bg.moveTo(WORLD_SIZE/2, 0); bg.lineTo(WORLD_SIZE/2, WORLD_SIZE);
+  bg.moveTo(0, WORLD_SIZE/2); bg.lineTo(WORLD_SIZE, WORLD_SIZE/2);
+  bg.stroke();
+
   // Границы мира — каменная стена
-  bg.fillStyle = "#555";
+  bg.fillStyle = "#333";
   bg.fillRect(0, 0, WORLD_SIZE, 12);
   bg.fillRect(0, WORLD_SIZE-12, WORLD_SIZE, 12);
   bg.fillRect(0, 0, 12, WORLD_SIZE);
   bg.fillRect(WORLD_SIZE-12, 0, 12, WORLD_SIZE);
 
-  // === OBSTACLES — деревья как настоящие, камни как валуны ===
+  // === OBSTACLES (стилизация под биом) ===
   for (const o of obstacles) {
+    const biome = biomeAt(o.x, o.y);
     if (o.type === "tree") {
-      // тень
       bg.fillStyle = "rgba(0,0,0,0.35)";
       bg.beginPath(); bg.arc(o.x+3, o.y+5, o.r, 0, TAU); bg.fill();
-      // крона (несколько слоёв для объёма)
-      bg.fillStyle = "#2d5016";
-      bg.beginPath(); bg.arc(o.x, o.y, o.r+2, 0, TAU); bg.fill();
-      bg.fillStyle = "#3d7020";
-      bg.beginPath(); bg.arc(o.x-2, o.y-2, o.r-2, 0, TAU); bg.fill();
-      bg.fillStyle = "#5aa030";
-      bg.beginPath(); bg.arc(o.x-4, o.y-4, o.r-8, 0, TAU); bg.fill();
-      // ствол (виден чуть-чуть)
-      bg.fillStyle = "#5a3a1a";
-      bg.fillRect(o.x-3, o.y+o.r-4, 6, 6);
+      if (biome === "desert") {
+        // КАКТУС
+        bg.fillStyle = "#3a7030";
+        bg.fillRect(o.x-5, o.y-o.r, 10, o.r*2);
+        bg.fillRect(o.x-12, o.y-5, 7, 12);  // боковая ветка
+        bg.fillRect(o.x+5, o.y-10, 7, 12);
+        bg.fillStyle = "#2a5020";
+        bg.fillRect(o.x-3, o.y-o.r+2, 2, o.r*2-4);
+      } else if (biome === "snow") {
+        // ЁЛКА (треугольники)
+        bg.fillStyle = "#1a3a1a";
+        bg.beginPath();
+        bg.moveTo(o.x, o.y - o.r);
+        bg.lineTo(o.x - o.r, o.y + o.r);
+        bg.lineTo(o.x + o.r, o.y + o.r);
+        bg.closePath(); bg.fill();
+        // снег на ёлке
+        bg.fillStyle = "rgba(255,255,255,0.8)";
+        bg.beginPath();
+        bg.moveTo(o.x, o.y - o.r);
+        bg.lineTo(o.x - o.r*0.6, o.y + o.r*0.3);
+        bg.lineTo(o.x + o.r*0.6, o.y + o.r*0.3);
+        bg.closePath(); bg.fill();
+        bg.fillStyle = "#5a3a1a";
+        bg.fillRect(o.x-2, o.y+o.r-2, 4, 6);
+      } else if (biome === "city") {
+        // ФОНАРНЫЙ СТОЛБ
+        bg.fillStyle = "#2a2a2a";
+        bg.fillRect(o.x-2, o.y-o.r, 4, o.r*2);
+        bg.fillStyle = "#ffe066";
+        bg.beginPath(); bg.arc(o.x, o.y-o.r, 8, 0, TAU); bg.fill();
+        bg.strokeStyle = "#aa7700"; bg.lineWidth = 2; bg.stroke();
+      } else {
+        // ОБЫЧНОЕ ДЕРЕВО (forest)
+        bg.fillStyle = "#2d5016";
+        bg.beginPath(); bg.arc(o.x, o.y, o.r+2, 0, TAU); bg.fill();
+        bg.fillStyle = "#3d7020";
+        bg.beginPath(); bg.arc(o.x-2, o.y-2, o.r-2, 0, TAU); bg.fill();
+        bg.fillStyle = "#5aa030";
+        bg.beginPath(); bg.arc(o.x-4, o.y-4, o.r-8, 0, TAU); bg.fill();
+        bg.fillStyle = "#5a3a1a";
+        bg.fillRect(o.x-3, o.y+o.r-4, 6, 6);
+      }
     } else {
-      // камень-валун
+      // КАМЕНЬ
       bg.fillStyle = "rgba(0,0,0,0.35)";
       bg.beginPath(); bg.arc(o.x+3, o.y+5, o.r, 0, TAU); bg.fill();
-      bg.fillStyle = "#666";
+      let rockColor = "#666";
+      if (biome === "desert") rockColor = "#a08060";
+      else if (biome === "snow") rockColor = "#dde2e8";
+      bg.fillStyle = rockColor;
       bg.beginPath(); bg.arc(o.x, o.y, o.r, 0, TAU); bg.fill();
-      bg.fillStyle = "#888";
+      bg.fillStyle = "rgba(255,255,255,0.3)";
       bg.beginPath(); bg.arc(o.x-3, o.y-3, o.r*0.7, 0, TAU); bg.fill();
-      bg.fillStyle = "#aaa";
-      bg.beginPath(); bg.arc(o.x-6, o.y-6, o.r*0.35, 0, TAU); bg.fill();
-      // трещина
-      bg.strokeStyle = "rgba(0,0,0,0.5)"; bg.lineWidth = 1;
-      bg.beginPath();
-      bg.moveTo(o.x-o.r*0.5, o.y); bg.lineTo(o.x+o.r*0.4, o.y-o.r*0.3);
-      bg.stroke();
     }
   }
+
+  // === BUILDINGS (только в city + по 1 в каждом другом биоме) ===
+  // Генерируем здания детерминированно
+  const buildings = generateBuildings();
+  for (const b of buildings) {
+    // тень
+    bg.fillStyle = "rgba(0,0,0,0.4)";
+    bg.fillRect(b.x - b.w/2 + 6, b.y - b.h/2 + 6, b.w, b.h);
+    // тело здания
+    bg.fillStyle = b.color;
+    bg.fillRect(b.x - b.w/2, b.y - b.h/2, b.w, b.h);
+    // рамка
+    bg.strokeStyle = "#222"; bg.lineWidth = 3;
+    bg.strokeRect(b.x - b.w/2, b.y - b.h/2, b.w, b.h);
+    // окна (4 окна на каждую сторону)
+    bg.fillStyle = "#88ccff";
+    const winSize = 14;
+    // верхняя стена окна
+    for (let i=0;i<3;i++) {
+      const wx = b.x - b.w/2 + 20 + i * (b.w-40)/2 - winSize/2;
+      bg.fillRect(wx, b.y - b.h/2 + 10, winSize, winSize);
+      bg.fillRect(wx, b.y + b.h/2 - 10 - winSize, winSize, winSize);
+    }
+    // дверь
+    bg.fillStyle = "#553a20";
+    bg.fillRect(b.x - 10, b.y + b.h/2 - 22, 20, 22);
+    bg.fillStyle = "#ffcc00";
+    bg.fillRect(b.x + 5, b.y + b.h/2 - 12, 3, 3);  // ручка
+    // крыша
+    bg.fillStyle = b.roofColor;
+    bg.fillRect(b.x - b.w/2 - 4, b.y - b.h/2 - 4, b.w + 8, 8);
+  }
+  // сохраним для коллизий
+  worldBuildings = buildings;
   bgRendered = true;
+}
+
+// Генерация зданий (используется и для рендера и для коллизий)
+let worldBuildings = null;
+function generateBuildings() {
+  if (worldBuildings) return worldBuildings;
+  const arr = [];
+  // 12 зданий в city биоме (правый нижний квадрант)
+  const seed = (i) => {
+    const v = Math.sin(i * 9999.12) * 43758.5;
+    return v - Math.floor(v);
+  };
+  for (let i=0; i<12; i++) {
+    const r1 = seed(i*3+1);
+    const r2 = seed(i*3+2);
+    const w = 100 + (seed(i*3+3) * 80) | 0;
+    const h = 80 + (seed(i*3+4) * 60) | 0;
+    const x = WORLD_SIZE/2 + 150 + r1 * (WORLD_SIZE/2 - 300);
+    const y = WORLD_SIZE/2 + 150 + r2 * (WORLD_SIZE/2 - 300);
+    const color = ["#a08060","#8a8a90","#b89070","#909a80","#a0a0aa"][i % 5];
+    const roofColor = ["#7a3030","#3a3a40","#5a2520","#4a4a30","#6a3030"][i % 5];
+    arr.push({ x, y, w, h, color, roofColor, hp: 99999 });
+  }
+  // 1 здание в каждом из остальных биомов
+  arr.push({ x: 800, y: 800, w:130, h:100, color:"#8b6a3a", roofColor:"#5a2520", hp:99999 });
+  arr.push({ x: 3200, y: 800, w:120, h:100, color:"#c0a070", roofColor:"#7a5a30", hp:99999 });
+  arr.push({ x: 800, y: 3200, w:130, h:100, color:"#aabac8", roofColor:"#5a6a80", hp:99999 });
+  return arr;
 }
 
 function draw() {
