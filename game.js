@@ -186,7 +186,8 @@ window.addEventListener("keydown", e => {
     if (k === "m" || (e.key && e.key.toLowerCase()==="m")) { toggleMute(); }
     if (e.key && e.key.toLowerCase()==="b") { cycleBuildType(); e.preventDefault(); }
     if (e.key && e.key.toLowerCase()==="n") { toggleMusic(); }
-    if (e.key && e.key.toLowerCase()==="e") {
+    // E — войти/выйти из машины. Срабатывает один раз на нажатие.
+    if (k === "e" && !e.repeat) {
       if (isMultiplayer && ws && ws.readyState===1) ws.send(JSON.stringify({ t:"use" }));
       else if (solo && solo.player && solo.player.alive) soloToggleVehicle();
     }
