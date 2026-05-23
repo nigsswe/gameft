@@ -225,10 +225,19 @@ window.addEventListener("mouseup",   e => {
 });
 canvas.addEventListener("contextmenu", e => e.preventDefault());
 canvas.addEventListener("wheel", e => {
-  if (!running || !me) return;
-  const owned = WEAPON_ORDER.filter(w => me.weapons[w] && me.weapons[w].owned);
+  if (!running) return;  // НЕ блокируем скролл когда меню открыто
+  // Solo тоже поддерживает колесо мыши
+  let owned = [];
+  let current = null;
+  if (isMultiplayer && me) {
+    owned = WEAPON_ORDER.filter(w => me.weapons && me.weapons[w] && me.weapons[w].owned);
+    current = me.current;
+  } else if (solo && solo.player) {
+    owned = WEAPON_ORDER.filter(w => solo.player.weapons[w] && solo.player.weapons[w].owned);
+    current = solo.player.current;
+  }
   if (owned.length<2) return;
-  let idx = owned.indexOf(me.current);
+  let idx = owned.indexOf(current);
   idx = (idx + (e.deltaY>0?1:-1) + owned.length) % owned.length;
   trySwitch(owned[idx]);
   e.preventDefault();
