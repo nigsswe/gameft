@@ -9,9 +9,25 @@
   #game { display:block; position:absolute; top:0; left:0; background:#3a5f3a; cursor: crosshair; }
   #hud {
     position: fixed; top:10px; left:10px; pointer-events:none;
-    text-shadow: 1px 1px 2px #000; font-size:16px; z-index:5;
+    text-shadow: 1px 1px 2px #000; font-size:14px; z-index:5;
+    background: rgba(0,0,0,0.45); padding:10px 14px; border-radius:8px;
+    min-width: 240px;
   }
-  #hud div { margin-bottom:4px; }
+  #hud > div { margin-bottom:4px; }
+  .barwrap { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+  .barwrap .lbl { width: 22px; text-align:center; font-size:18px; }
+  .barwrap .bar {
+    flex:1; height:14px; background:#222; border:1px solid #000;
+    border-radius:3px; overflow:hidden; position:relative;
+  }
+  .barwrap .fill { height:100%; transition: width 0.2s ease; }
+  .barwrap .val {
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    font-size:11px; font-weight:bold; color:#fff; text-shadow:1px 1px 1px #000;
+  }
+  .fill.hp { background:linear-gradient(180deg, #2ecc71, #15803d); }
+  .fill.hp.low { background:linear-gradient(180deg, #e74c3c, #b91c1c); }
+  .fill.armor { background:linear-gradient(180deg, #3498db, #1e40af); }
   #weapon-bar {
     position: fixed; bottom: 15px; left: 50%; transform: translateX(-50%);
     display:flex; gap:8px; z-index:5; pointer-events:none;
@@ -93,7 +109,15 @@
 <canvas id="game" tabindex="0"></canvas>
 
 <div id="hud">
-  <div>❤️  HP: <span id="hp">100</span></div>
+  <div class="barwrap">
+    <div class="lbl">❤️</div>
+    <div class="bar"><div class="fill hp" id="hp-fill" style="width:100%"></div><div class="val" id="hp-val">100/100</div></div>
+  </div>
+  <div class="barwrap" id="armor-row" style="display:none;">
+    <div class="lbl">🛡</div>
+    <div class="bar"><div class="fill armor" id="armor-fill" style="width:0%"></div><div class="val" id="armor-val">0/100</div></div>
+  </div>
+  <div style="display:none"><span id="hp"></span></div>
   <div>👥  Alive: <span id="alive">50</span></div>
   <div>🏆  Kills: <span id="kills">0</span></div>
   <div>⛈️  Storm in: <span id="storm">--</span>s</div>

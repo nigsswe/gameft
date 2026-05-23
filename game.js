@@ -11,6 +11,29 @@ const mini   = document.getElementById("minimap");
 const mctx   = mini.getContext("2d", { alpha: true });
 
 const hpEl     = document.getElementById("hp");
+const hpFill   = document.getElementById("hp-fill");
+const hpVal    = document.getElementById("hp-val");
+const armorRow = document.getElementById("armor-row");
+const armorFill= document.getElementById("armor-fill");
+const armorVal = document.getElementById("armor-val");
+function setHpBar(hp, max=100, armor=0, maxArmor=100) {
+  if (hpFill) {
+    const pct = Math.max(0, Math.min(100, (hp/max)*100));
+    hpFill.style.width = pct + "%";
+    hpFill.classList.toggle("low", pct < 30);
+    if (hpVal) hpVal.textContent = Math.max(0, Math.floor(hp)) + "/" + max;
+  }
+  if (armorRow) {
+    if (armor > 0) {
+      armorRow.style.display = "flex";
+      const pct = Math.max(0, Math.min(100, (armor/maxArmor)*100));
+      armorFill.style.width = pct + "%";
+      armorVal.textContent = Math.floor(armor) + "/" + maxArmor;
+    } else {
+      armorRow.style.display = "none";
+    }
+  }
+}
 const aliveEl  = document.getElementById("alive");
 const killsEl  = document.getElementById("kills");
 const stormEl  = document.getElementById("storm");
@@ -164,8 +187,8 @@ window.addEventListener("keydown", e => {
     if (e.key && e.key.toLowerCase()==="b") { cycleBuildType(); e.preventDefault(); }
     if (e.key && e.key.toLowerCase()==="n") { toggleMusic(); }
     if (e.key && e.key.toLowerCase()==="e") {
-      // E — войти/выйти из машины (только MP)
       if (isMultiplayer && ws && ws.readyState===1) ws.send(JSON.stringify({ t:"use" }));
+      else if (solo && solo.player && solo.player.alive) soloToggleVehicle();
     }
     if (e.key === "F1") { setBuildType("wall"); e.preventDefault(); }
     if (e.key === "F2") { setBuildType("floor"); e.preventDefault(); }
@@ -247,6 +270,7 @@ function startSolo(botCount, playerName) {
     obstacles: makeObstacles(),
     pickups: makePickups(),
     walls: [],
+    vehicles: [],
     airdrops: [],
     nextAirdrop: 30,
     kills: 0,
@@ -259,6 +283,15 @@ function startSolo(botCount, playerName) {
     gameOver: false, gameWon: false,
   };
   for (let i=0;i<botCount;i++) solo.bots.push(makeSoloBot(i));
+  // спавним 8 машин
+  for (let i=0;i<8;i++) {
+    solo.vehicles.push({
+      id: 1000+i,
+      x: rand(300, WORLD_SIZE-300), y: rand(300, WORLD_SIZE-300),
+      angle: rand(0, TAU),
+      hp: 200, maxHp: 200, driver: null,
+    });
+  }
   syncWeaponBar(solo.player);
   matsEl.textContent = solo.player.materials;
   buildMode = false;
@@ -510,11 +543,31 @@ function soloBotTick(s, b, dt) {
       soloShoot(s, b, ang+jitter);
     }
   } else {
-    b.wanderTimer -= dt;
-    if (b.wanderTimer<=0) { b.wanderTimer = rand(1,3); b.wanderDir = rand(0,TAU); }
-    b.x += Math.cos(b.wanderDir)*b.speed*0.4*dt;
-    b.y += Math.sin(b.wanderDir)*b.speed*0.4*dt;
-    b.angle = b.wanderDir;
+    // ИИ: если бот вне зоны — бежать в центр
+    const sdx = b.x - s.storm.cx, sdy = b.y - s.storm.cy;
+    const sd2 = sdx*sdx + sdy*sdy;
+    const safeR = s.storm.radius * 0.85;
+    if (sd2 > safeR*safeR) {
+      // бежать к центру зоны
+      const a = Math.atan2(s.storm.cy - b.y, s.storm.cx - b.x);
+      b.angle = a;
+      b.x += Math.cos(a)*b.speed*dt;
+      b.y += Math.sin(a)*b.speed*dt;
+    } else {
+      // блуждать в зоне
+      b.wanderTimer -= dt;
+      if (b.wanderTimer<=0) { b.wanderTimer = rand(1,3); b.wanderDir = rand(0,TAU); }
+      const nx = b.x + Math.cos(b.wanderDir)*b.speed*0.4*dt;
+      const ny = b.y + Math.sin(b.wanderDir)*b.speed*0.4*dt;
+      // если выйдут из зоны — развернуть
+      const dxn = nx - s.storm.cx, dyn = ny - s.storm.cy;
+      if (dxn*dxn + dyn*dyn < safeR*safeR) {
+        b.x = nx; b.y = ny;
+      } else {
+        b.wanderDir = Math.atan2(s.storm.cy - b.y, s.storm.cx - b.x);
+      }
+      b.angle = b.wanderDir;
+    }
   }
   // pickups
   for (let i=s.pickups.length-1;i>=0;i--) {
@@ -548,6 +601,28 @@ function soloBotTick(s, b, dt) {
   if (b.hp<=0) { b.alive=false; spawnBlood(s, b.x,b.y); }
 }
 
+function soloToggleVehicle() {
+  const s = solo; if (!s) return;
+  const p = s.player;
+  if (p.vehicleId) {
+    const v = s.vehicles.find(x => x.id === p.vehicleId);
+    if (v) v.driver = null;
+    p.vehicleId = null;
+    return;
+  }
+  let nearest=null, nd2=70*70;
+  for (const v of s.vehicles) {
+    if (v.hp<=0 || v.driver) continue;
+    const dx=v.x-p.x, dy=v.y-p.y, d2=dx*dx+dy*dy;
+    if (d2<nd2) { nearest=v; nd2=d2; }
+  }
+  if (nearest) {
+    nearest.driver = p;
+    p.vehicleId = nearest.id;
+    Sounds.uiClick();
+  }
+}
+
 function spawnBlood(s, x,y) {
   for (let i=0;i<8;i++) s.particles.push({x,y,vx:rand(-150,150),vy:rand(-150,150),life:0.5,color:"#c0392b",r:3});
 }
@@ -561,15 +636,47 @@ function soloUpdate(dt) {
     if (keys["w"]) dy--; if (keys["s"]) dy++;
     if (keys["a"]) dx--; if (keys["d"]) dx++;
     const ln=Math.hypot(dx,dy); if (ln>0){dx/=ln;dy/=ln;}
-    let speedMul = (keys["shift"]?1.5:1);
-    const floor = floorUnder(s.walls, p.x, p.y);
-    if (floor) speedMul *= STRUCTURES[floor.type].speedMod;
-    const sp = speedMul * p.speed;
-    p.x += dx*sp*dt; p.y += dy*sp*dt;
     // aim в мировых координатах
     const aimWX = mouse.x + (p.x - canvas.width/2);
     const aimWY = mouse.y + (p.y - canvas.height/2);
     p.angle = Math.atan2(aimWY-p.y, aimWX-p.x);
+    // === Вождение машины (Solo) ===
+    let inVehicle = false;
+    if (p.vehicleId) {
+      const v = s.vehicles.find(x => x.id === p.vehicleId);
+      if (v && v.hp > 0) {
+        inVehicle = true;
+        v.angle = p.angle;
+        const fwd = (keys["w"]?1:0) - (keys["s"]?1:0);
+        const strafe = (keys["d"]?1:0) - (keys["a"]?1:0);
+        const VS = 460;
+        v.x += (Math.cos(v.angle)*fwd + Math.cos(v.angle+Math.PI/2)*strafe) * VS * dt;
+        v.y += (Math.sin(v.angle)*fwd + Math.sin(v.angle+Math.PI/2)*strafe) * VS * dt;
+        v.x = clamp(v.x, 30, WORLD_SIZE-30);
+        v.y = clamp(v.y, 30, WORLD_SIZE-30);
+        // таран ботов
+        for (const o of s.bots) {
+          if (!o.alive) continue;
+          const ddx=o.x-v.x, ddy=o.y-v.y;
+          if (ddx*ddx+ddy*ddy < 40*40) {
+            o.hp -= 35;
+            if (o.hp<=0) {
+              o.alive=false; spawnBlood(s, o.x, o.y);
+              s.kills++; killsEl.textContent = s.kills;
+              addKillfeed(`💥 Rammed ${o.name}!`);
+              p.materials = Math.min(500, p.materials + 25);
+              matsEl.textContent = p.materials;
+            }
+          }
+        }
+        p.x = v.x; p.y = v.y;
+      } else { p.vehicleId = null; }
+    }
+    let speedMul = (keys["shift"]?1.5:1);
+    const floor = floorUnder(s.walls, p.x, p.y);
+    if (floor) speedMul *= STRUCTURES[floor.type].speedMod;
+    const sp = speedMul * p.speed;
+    if (!inVehicle) { p.x += dx*sp*dt; p.y += dy*sp*dt; }
     // в build-режиме ЛКМ ставит стену, а не стреляет (стрельба отключена)
     if (mouse.down && !buildMode) soloShoot(s, p, p.angle);
     if (p.fireCD>0) p.fireCD -= dt;
@@ -745,7 +852,8 @@ function soloUpdate(dt) {
   stormEl.textContent = Math.max(0, Math.ceil(s.storm.nextShrink - s.timer));
   const aliveN = (p.alive?1:0) + s.bots.filter(b=>b.alive).length;
   aliveEl.textContent = aliveN;
-  hpEl.textContent = Math.max(0, Math.floor(p.hp));
+  setHpBar(p.hp, p.maxHp, p.armor || 0, p.maxArmor || 100);
+  if (hpEl) hpEl.textContent = Math.max(0, Math.floor(p.hp));
   reloadEl.style.display = p.reloading ? "block" : "none";
   if (p.alive && s.bots.every(b=>!b.alive) && !s.gameWon) {
     s.gameWon = true;
@@ -890,7 +998,8 @@ function updateMPHud() {
   const now = performance.now();
   if (now - lastHudUpdate < 200) return;
   lastHudUpdate = now;
-  hpEl.textContent = me.hp + (me.armor > 0 ? ` (+🛡${me.armor})` : "");
+  setHpBar(me.hp || 0, 100, me.armor || 0, me.maxArmor || 100);
+  if (hpEl) hpEl.textContent = me.hp;
   killsEl.textContent = me.kills;
   let aliveN = 0;
   for (const p of snap.players) if (p.al) aliveN++;
@@ -1054,6 +1163,7 @@ function getEntitiesForRender() {
       ents: [s.player, ...s.bots],
       bullets: s.bullets, pickups: s.pickups, obstacles: s.obstacles, particles: s.particles,
       walls: s.walls,
+      vehicles: s.vehicles || [],
       airdrops: s.airdrops || [],
       storm: s.storm,
       camX: s.player.x - canvas.width/2,
@@ -1079,27 +1189,88 @@ function buildBackground(obstacles) {
   bgCanvas.width = Math.floor(WORLD_SIZE * BG_SCALE);
   bgCanvas.height = Math.floor(WORLD_SIZE * BG_SCALE);
   const bg = bgCanvas.getContext("2d", { alpha: false });
-  bg.scale(BG_SCALE, BG_SCALE);  // рисуем в мировых координатах, но в меньший canvas
-  bg.fillStyle = "#3a5f3a";
+  bg.scale(BG_SCALE, BG_SCALE);
+
+  // === MINECRAFT-STYLE GRASS BLOCKS ===
+  // Базовый тёмно-зелёный фон
+  bg.fillStyle = "#3d6b2f";
   bg.fillRect(0, 0, WORLD_SIZE, WORLD_SIZE);
-  bg.strokeStyle = "rgba(255,255,255,0.05)"; bg.lineWidth = 2;
-  bg.beginPath();
-  for (let x=0; x<=WORLD_SIZE; x+=100) { bg.moveTo(x, 0); bg.lineTo(x, WORLD_SIZE); }
-  for (let y=0; y<=WORLD_SIZE; y+=100) { bg.moveTo(0, y); bg.lineTo(WORLD_SIZE, y); }
-  bg.stroke();
-  bg.strokeStyle = "#222"; bg.lineWidth = 8;
-  bg.strokeRect(0, 0, WORLD_SIZE, WORLD_SIZE);
+
+  // Псевдо-случайный хеш для детерминированного шума
+  function h(x, y) {
+    const v = Math.sin(x*12.9898 + y*78.233) * 43758.5453;
+    return v - Math.floor(v);
+  }
+  const BS = 40; // размер блока
+  for (let y=0; y<WORLD_SIZE; y+=BS) {
+    for (let x=0; x<WORLD_SIZE; x+=BS) {
+      const n = h(x/BS, y/BS);
+      // вариация цвета травы
+      const shade = Math.floor(n * 35);
+      const r = 55 + Math.floor(n*30);
+      const g = 100 + shade;
+      const b = 45 + Math.floor(n*15);
+      bg.fillStyle = `rgb(${r},${g},${b})`;
+      bg.fillRect(x, y, BS, BS);
+      // Текстурные пиксели травы (тёмные точки)
+      const dots = 4 + Math.floor(n*4);
+      bg.fillStyle = `rgba(0,0,0,0.18)`;
+      for (let i=0; i<dots; i++) {
+        const dx = (h(x+i, y) * BS) | 0;
+        const dy = (h(x, y+i*3) * BS) | 0;
+        bg.fillRect(x+dx, y+dy, 3, 3);
+      }
+      // Светлые блики
+      bg.fillStyle = `rgba(180,255,150,0.12)`;
+      for (let i=0; i<2; i++) {
+        const dx = (h(x+i*7, y+3) * BS) | 0;
+        const dy = (h(x+5, y+i*11) * BS) | 0;
+        bg.fillRect(x+dx, y+dy, 2, 2);
+      }
+      // тонкие границы блоков (как edges кубов в майнкрафте)
+      bg.strokeStyle = "rgba(0,0,0,0.08)"; bg.lineWidth = 1;
+      bg.strokeRect(x+0.5, y+0.5, BS-1, BS-1);
+    }
+  }
+
+  // Границы мира — каменная стена
+  bg.fillStyle = "#555";
+  bg.fillRect(0, 0, WORLD_SIZE, 12);
+  bg.fillRect(0, WORLD_SIZE-12, WORLD_SIZE, 12);
+  bg.fillRect(0, 0, 12, WORLD_SIZE);
+  bg.fillRect(WORLD_SIZE-12, 0, 12, WORLD_SIZE);
+
+  // === OBSTACLES — деревья как настоящие, камни как валуны ===
   for (const o of obstacles) {
     if (o.type === "tree") {
-      bg.fillStyle = "#1e3d1e";
-      bg.beginPath(); bg.arc(o.x, o.y, o.r, 0, TAU); bg.fill();
-      bg.fillStyle = "#6b4423";
-      bg.beginPath(); bg.arc(o.x, o.y, 6, 0, TAU); bg.fill();
+      // тень
+      bg.fillStyle = "rgba(0,0,0,0.35)";
+      bg.beginPath(); bg.arc(o.x+3, o.y+5, o.r, 0, TAU); bg.fill();
+      // крона (несколько слоёв для объёма)
+      bg.fillStyle = "#2d5016";
+      bg.beginPath(); bg.arc(o.x, o.y, o.r+2, 0, TAU); bg.fill();
+      bg.fillStyle = "#3d7020";
+      bg.beginPath(); bg.arc(o.x-2, o.y-2, o.r-2, 0, TAU); bg.fill();
+      bg.fillStyle = "#5aa030";
+      bg.beginPath(); bg.arc(o.x-4, o.y-4, o.r-8, 0, TAU); bg.fill();
+      // ствол (виден чуть-чуть)
+      bg.fillStyle = "#5a3a1a";
+      bg.fillRect(o.x-3, o.y+o.r-4, 6, 6);
     } else {
-      bg.fillStyle = "#7f8c8d";
+      // камень-валун
+      bg.fillStyle = "rgba(0,0,0,0.35)";
+      bg.beginPath(); bg.arc(o.x+3, o.y+5, o.r, 0, TAU); bg.fill();
+      bg.fillStyle = "#666";
       bg.beginPath(); bg.arc(o.x, o.y, o.r, 0, TAU); bg.fill();
-      bg.fillStyle = "#95a5a6";
-      bg.beginPath(); bg.arc(o.x-6, o.y-6, o.r*0.4, 0, TAU); bg.fill();
+      bg.fillStyle = "#888";
+      bg.beginPath(); bg.arc(o.x-3, o.y-3, o.r*0.7, 0, TAU); bg.fill();
+      bg.fillStyle = "#aaa";
+      bg.beginPath(); bg.arc(o.x-6, o.y-6, o.r*0.35, 0, TAU); bg.fill();
+      // трещина
+      bg.strokeStyle = "rgba(0,0,0,0.5)"; bg.lineWidth = 1;
+      bg.beginPath();
+      bg.moveTo(o.x-o.r*0.5, o.y); bg.lineTo(o.x+o.r*0.4, o.y-o.r*0.3);
+      bg.stroke();
     }
   }
   bgRendered = true;
@@ -1301,33 +1472,82 @@ function draw() {
     }
   }
 
-  // entities (cull)
+  // entities (cull) — спрайты-человечки top-down
   for (const e of R.ents) {
     if (!inView(e.x, e.y, 30)) continue;
     if (!e.alive) {
-      ctx.fillStyle="rgba(80,0,0,0.4)"; ctx.beginPath(); ctx.arc(e.x,e.y,e.r,0,TAU); ctx.fill();
+      // труп
+      ctx.fillStyle="rgba(60,0,0,0.5)";
+      ctx.beginPath(); ctx.ellipse(e.x, e.y, e.r+2, e.r-2, e.angle||0, 0, TAU); ctx.fill();
+      ctx.strokeStyle="rgba(0,0,0,0.6)"; ctx.lineWidth=1.5; ctx.stroke();
+      // крестик глаз
+      ctx.strokeStyle="#000"; ctx.lineWidth=2;
+      ctx.beginPath();
+      ctx.moveTo(e.x-4, e.y-3); ctx.lineTo(e.x+0, e.y+1);
+      ctx.moveTo(e.x+4, e.y-3); ctx.lineTo(e.x+0, e.y+1);
+      ctx.stroke();
       continue;
     }
-    ctx.fillStyle = e.isPlayer ? "#3aa3ff" : e.color;
-    ctx.beginPath(); ctx.arc(e.x,e.y,e.r,0,TAU); ctx.fill();
-    ctx.strokeStyle="#000"; ctx.lineWidth=2; ctx.stroke();
-    // gun: длина зависит от оружия
-    const gunLen = e.current==="sniper"?30 : e.current==="shotgun"?20 : e.current==="ar"?26 : 22;
-    ctx.strokeStyle="#222"; ctx.lineWidth = e.current==="shotgun"?6:4;
-    ctx.beginPath();
-    ctx.moveTo(e.x, e.y);
-    ctx.lineTo(e.x + Math.cos(e.angle)*gunLen, e.y + Math.sin(e.angle)*gunLen);
-    ctx.stroke();
-    // hp bar
-    const w=30,h=4;
-    ctx.fillStyle="#000"; ctx.fillRect(e.x-w/2, e.y-e.r-12, w, h);
+    ctx.save();
+    ctx.translate(e.x, e.y);
+    ctx.rotate(e.angle);
+    // тень
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.beginPath(); ctx.ellipse(2, 3, e.r+1, e.r-2, 0, 0, TAU); ctx.fill();
+    // НОГИ (видны снизу из-под тела)
+    ctx.fillStyle = "#3a4060";
+    ctx.fillRect(-8, -5, 5, 4);
+    ctx.fillRect(3, -5, 5, 4);
+    // ТЕЛО (овал по направлению)
+    const bodyColor = e.isPlayer ? "#3aa3ff" : e.color;
+    ctx.fillStyle = bodyColor;
+    ctx.beginPath(); ctx.ellipse(0, 0, e.r+1, e.r-3, 0, 0, TAU); ctx.fill();
+    ctx.strokeStyle = "#000"; ctx.lineWidth = 1.5; ctx.stroke();
+    // РУКИ — обе держат оружие
+    ctx.fillStyle = "#f4c590"; // кожа
+    ctx.beginPath(); ctx.arc(8, -7, 4, 0, TAU); ctx.fill();
+    ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = "#f4c590";
+    ctx.beginPath(); ctx.arc(8, 7, 4, 0, TAU); ctx.fill();
+    ctx.strokeStyle = "#000"; ctx.stroke();
+    // ГОЛОВА
+    ctx.fillStyle = "#f4c590";
+    ctx.beginPath(); ctx.arc(2, 0, 7, 0, TAU); ctx.fill();
+    ctx.strokeStyle = "#000"; ctx.lineWidth = 1.5; ctx.stroke();
+    // волосы/шапка
+    ctx.fillStyle = e.isPlayer ? "#1a4a80" : "#2a2a2a";
+    ctx.beginPath(); ctx.arc(2, 0, 7, -Math.PI*0.85, -Math.PI*0.15); ctx.fill();
+    // глаза (точки спереди)
+    ctx.fillStyle = "#000";
+    ctx.fillRect(7, -2, 1.5, 1.5);
+    ctx.fillRect(7, 1, 1.5, 1.5);
+    // ОРУЖИЕ в руках
+    const w = e.current;
+    const gunLen = w==="sniper"?32 : w==="shotgun"?22 : w==="ar"?28 : w==="minigun"?30 : w==="rocket"?30 : 18;
+    const gunW = w==="shotgun"||w==="minigun"||w==="rocket" ? 6 : 4;
+    ctx.fillStyle = w==="minigun" ? "#444" : w==="rocket" ? "#553a20" : "#2a2a2a";
+    ctx.fillRect(8, -gunW/2, gunLen, gunW);
+    // ствол (тёмнее)
+    ctx.fillStyle = "#111";
+    ctx.fillRect(8 + gunLen - 4, -gunW/2, 4, gunW);
+    // если снайперка — оптика
+    if (w === "sniper") {
+      ctx.fillStyle = "#444";
+      ctx.fillRect(14, -gunW/2-3, 8, 3);
+    }
+    ctx.restore();
+    // === HP bar ===
+    const w2=34, h=4;
+    ctx.fillStyle="rgba(0,0,0,0.7)"; ctx.fillRect(e.x-w2/2, e.y-e.r-14, w2, h);
     ctx.fillStyle = e.hp>50?"#2ecc71":e.hp>25?"#f1c40f":"#e74c3c";
-    ctx.fillRect(e.x-w/2, e.y-e.r-12, w*(e.hp/(e.maxHp||100)), h);
-    // name
+    ctx.fillRect(e.x-w2/2, e.y-e.r-14, w2*(e.hp/(e.maxHp||100)), h);
+    // имя
     if (e.name) {
       ctx.fillStyle = e.isPlayer ? "#aaddff" : "#fff";
       ctx.font = "bold 11px Arial"; ctx.textAlign="center";
-      ctx.fillText(e.name, e.x, e.y-e.r-16);
+      ctx.strokeStyle = "#000"; ctx.lineWidth = 2;
+      ctx.strokeText(e.name, e.x, e.y-e.r-18);
+      ctx.fillText(e.name, e.x, e.y-e.r-18);
     }
   }
 
