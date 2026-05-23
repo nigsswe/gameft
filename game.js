@@ -684,8 +684,6 @@ function soloUpdate(dt) {
     const aimWY = mouse.y + (p.y - canvas.height/2);
     p.angle = Math.atan2(aimWY-p.y, aimWX-p.x);
     // === Вождение машины (Solo) ===
-    // WASD — это направление движения (как top-down arcade).
-    // Машина сама поворачивает в сторону куда едет, плавно (lerp).
     let inVehicle = false;
     if (p.vehicleId) {
       const v = s.vehicles.find(x => x.id === p.vehicleId);
@@ -698,22 +696,27 @@ function soloUpdate(dt) {
         if (keys["d"]) mvx++;
         const mlen = Math.hypot(mvx, mvy);
         const VS = 280;
+        let movedDist = 0;
         if (mlen > 0) {
           mvx /= mlen; mvy /= mlen;
+          const oldX = v.x, oldY = v.y;
           v.x += mvx * VS * dt;
           v.y += mvy * VS * dt;
-          // целевой угол = направление движения
+          // коллизия с препятствиями для машины
+          v.r = 25;  // радиус машины
+          collideObstacles(v, s.obstacles, s.walls);
+          movedDist = Math.hypot(v.x - oldX, v.y - oldY);
           const targetAng = Math.atan2(mvy, mvx);
-          // плавный поворот к цели (lerp по самому короткому пути)
           let diff = targetAng - v.angle;
           while (diff > Math.PI) diff -= 2*Math.PI;
           while (diff < -Math.PI) diff += 2*Math.PI;
-          v.angle += diff * Math.min(1, dt * 8);  // быстрый поворот
+          v.angle += diff * Math.min(1, dt * 8);
         }
         v.x = clamp(v.x, 30, WORLD_SIZE-30);
         v.y = clamp(v.y, 30, WORLD_SIZE-30);
-        // таран ботов (только при движении)
-        if (mlen > 0) {
+        // ТАРАН — только если реально движемся и расстояние/dt > порог
+        const speed = movedDist / Math.max(0.001, dt);
+        if (speed > 100) {  // нужна реальная скорость
           for (const o of s.bots) {
             if (!o.alive) continue;
             const ddx=o.x-v.x, ddy=o.y-v.y;

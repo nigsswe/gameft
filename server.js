@@ -92,6 +92,26 @@ function makeObstacles() {
   for (let i=0;i<90;i++)  arr.push({ type:"rock", x:rand(0,WORLD_SIZE), y:rand(0,WORLD_SIZE), r:28 });
   return arr;
 }
+
+// Здания (детерминированно — те же что и на клиенте)
+function makeBuildings() {
+  const arr = [];
+  const seed = (i) => { const v = Math.sin(i * 9999.12) * 43758.5; return v - Math.floor(v); };
+  for (let i=0; i<12; i++) {
+    const r1 = seed(i*3+1);
+    const r2 = seed(i*3+2);
+    const w = 100 + (seed(i*3+3) * 80) | 0;
+    const h = 80 + (seed(i*3+4) * 60) | 0;
+    const x = WORLD_SIZE/2 + 150 + r1 * (WORLD_SIZE/2 - 300);
+    const y = WORLD_SIZE/2 + 150 + r2 * (WORLD_SIZE/2 - 300);
+    arr.push({ x, y, w, h });
+  }
+  arr.push({ x: 800, y: 800, w:130, h:100 });
+  arr.push({ x: 3200, y: 800, w:120, h:100 });
+  arr.push({ x: 800, y: 3200, w:130, h:100 });
+  return arr;
+}
+const buildings = makeBuildings();
 function makePickups() {
   const arr = [];
   for (let i=0;i<100;i++) {
@@ -257,11 +277,34 @@ wss.on("connection", (ws) => {
 
 // ---------- Game logic ----------
 function collideObstacles(ent) {
+  const radius = ent.r || 14;
   for (const o of obstacles) {
-    const dx=ent.x-o.x, dy=ent.y-o.y, d2=dx*dx+dy*dy, rr=14+o.r;
+    const dx=ent.x-o.x, dy=ent.y-o.y, d2=dx*dx+dy*dy, rr=radius+o.r;
     if (d2 < rr*rr && d2 > 0.0001) {
       const d = Math.sqrt(d2);
       ent.x += (dx/d)*(rr-d); ent.y += (dy/d)*(rr-d);
+    }
+  }
+  // здания — 4 стены AABB с дверью снизу
+  for (const bd of buildings) {
+    const doorX1 = bd.x - 12, doorX2 = bd.x + 12;
+    const walls4 = [
+      {x1: bd.x-bd.w/2, y1: bd.y-bd.h/2, x2: bd.x+bd.w/2, y2: bd.y-bd.h/2+4},
+      {x1: bd.x-bd.w/2, y1: bd.y-bd.h/2, x2: bd.x-bd.w/2+4, y2: bd.y+bd.h/2},
+      {x1: bd.x+bd.w/2-4, y1: bd.y-bd.h/2, x2: bd.x+bd.w/2, y2: bd.y+bd.h/2},
+      {x1: bd.x-bd.w/2, y1: bd.y+bd.h/2-4, x2: doorX1, y2: bd.y+bd.h/2},
+      {x1: doorX2, y1: bd.y+bd.h/2-4, x2: bd.x+bd.w/2, y2: bd.y+bd.h/2},
+    ];
+    for (const w of walls4) {
+      const cx = clamp(ent.x, w.x1, w.x2);
+      const cy = clamp(ent.y, w.y1, w.y2);
+      const dx = ent.x - cx, dy = ent.y - cy;
+      const d2 = dx*dx + dy*dy;
+      if (d2 < radius*radius && d2 > 0.0001) {
+        const d = Math.sqrt(d2);
+        ent.x += (dx/d)*(radius - d);
+        ent.y += (dy/d)*(radius - d);
+      }
     }
   }
   // walls
@@ -376,32 +419,52 @@ function updatePlayer(p, dt) {
   if (len>0) { dx/=len; dy/=len; }
   p.angle = p.input.angle;
 
-  // Если игрок в машине — двигаем машину, синхронизируем позицию игрока
+  // Если игрок в машине — двигаем машину top-down arcade style
   if (p.vehicleId) {
     const v = vehicles.find(x => x.id === p.vehicleId);
     if (v && v.hp > 0) {
-      v.angle = p.angle;
-      // движение по углу мыши (рулим мышью)
-      const fwd = (p.input.up ? 1 : 0) - (p.input.down ? 1 : 0);
-      const strafe = (p.input.right ? 1 : 0) - (p.input.left ? 1 : 0);
-      v.x += (Math.cos(v.angle)*fwd + Math.cos(v.angle+Math.PI/2)*strafe) * VEHICLE_SPEED * dt;
-      v.y += (Math.sin(v.angle)*fwd + Math.sin(v.angle+Math.PI/2)*strafe) * VEHICLE_SPEED * dt;
+      let mvx = 0, mvy = 0;
+      if (p.input.up) mvy--;
+      if (p.input.down) mvy++;
+      if (p.input.left) mvx--;
+      if (p.input.right) mvx++;
+      const mlen = Math.hypot(mvx, mvy);
+      const VS = 280;
+      let movedDist = 0;
+      if (mlen > 0) {
+        mvx /= mlen; mvy /= mlen;
+        const oldX = v.x, oldY = v.y;
+        v.x += mvx * VS * dt;
+        v.y += mvy * VS * dt;
+        // коллизия машины с препятствиями
+        v.r = 25;
+        collideObstacles(v);
+        movedDist = Math.hypot(v.x - oldX, v.y - oldY);
+        const targetAng = Math.atan2(mvy, mvx);
+        let diff = targetAng - v.angle;
+        while (diff > Math.PI) diff -= 2*Math.PI;
+        while (diff < -Math.PI) diff += 2*Math.PI;
+        v.angle += diff * Math.min(1, dt * 8);
+      }
       v.x = clamp(v.x, 30, WORLD_SIZE-30);
       v.y = clamp(v.y, 30, WORLD_SIZE-30);
-      // машина таранит и наносит урон
-      for (const o of players.values()) {
-        if (o === p || !o.alive || o.vehicleId) continue;
-        const ddx=o.x-v.x, ddy=o.y-v.y;
-        if (ddx*ddx+ddy*ddy < 40*40) {
-          o.hp -= 35;
-          if (o.hp <= 0) killPlayer(o, p, "ram");
+      // ТАРАН только при реальной скорости
+      const speed = movedDist / Math.max(0.001, dt);
+      if (speed > 100) {
+        for (const o of players.values()) {
+          if (o === p || !o.alive || o.vehicleId) continue;
+          const ddx=o.x-v.x, ddy=o.y-v.y;
+          if (ddx*ddx+ddy*ddy < 40*40) {
+            o.hp -= 25;
+            if (o.hp <= 0) killPlayer(o, p, "ram");
+          }
         }
       }
-      p.x = v.x; p.y = v.y;
+      p.x = v.x; p.y = v.y; p.angle = v.angle;
       if (p.fireCD > 0) p.fireCD -= dt;
-      return; // в машине не стреляешь и не подбираешь pickups
+      return;
     } else {
-      p.vehicleId = null;  // машина разрушена
+      p.vehicleId = null;
     }
   }
 
