@@ -646,30 +646,35 @@ function soloUpdate(dt) {
       const v = s.vehicles.find(x => x.id === p.vehicleId);
       if (v && v.hp > 0) {
         inVehicle = true;
-        v.angle = p.angle;
+        // Машина едет КУДА УГОЛ МАШИНЫ, а не куда смотрит игрок
+        // Угол меняется только при поворотах (A/D), мышь не рулит
+        const turn = (keys["d"]?1:0) - (keys["a"]?1:0);
+        v.angle += turn * 2.2 * dt;
         const fwd = (keys["w"]?1:0) - (keys["s"]?1:0);
-        const strafe = (keys["d"]?1:0) - (keys["a"]?1:0);
-        const VS = 460;
-        v.x += (Math.cos(v.angle)*fwd + Math.cos(v.angle+Math.PI/2)*strafe) * VS * dt;
-        v.y += (Math.sin(v.angle)*fwd + Math.sin(v.angle+Math.PI/2)*strafe) * VS * dt;
+        const VS = 260;  // более разумная скорость (было 460)
+        v.x += Math.cos(v.angle) * fwd * VS * dt;
+        v.y += Math.sin(v.angle) * fwd * VS * dt;
         v.x = clamp(v.x, 30, WORLD_SIZE-30);
         v.y = clamp(v.y, 30, WORLD_SIZE-30);
-        // таран ботов
-        for (const o of s.bots) {
-          if (!o.alive) continue;
-          const ddx=o.x-v.x, ddy=o.y-v.y;
-          if (ddx*ddx+ddy*ddy < 40*40) {
-            o.hp -= 35;
-            if (o.hp<=0) {
-              o.alive=false; spawnBlood(s, o.x, o.y);
-              s.kills++; killsEl.textContent = s.kills;
-              addKillfeed(`💥 Rammed ${o.name}!`);
-              p.materials = Math.min(500, p.materials + 25);
-              matsEl.textContent = p.materials;
+        // таран ботов (только при движении вперёд)
+        if (Math.abs(fwd) > 0) {
+          for (const o of s.bots) {
+            if (!o.alive) continue;
+            const ddx=o.x-v.x, ddy=o.y-v.y;
+            if (ddx*ddx+ddy*ddy < 35*35) {
+              o.hp -= 25;
+              if (o.hp<=0) {
+                o.alive=false; spawnBlood(s, o.x, o.y);
+                s.kills++; killsEl.textContent = s.kills;
+                addKillfeed(`💥 Rammed ${o.name}!`);
+                p.materials = Math.min(500, p.materials + 25);
+                matsEl.textContent = p.materials;
+              }
             }
           }
         }
         p.x = v.x; p.y = v.y;
+        p.angle = v.angle;  // игрок смотрит туда же куда машина
       } else { p.vehicleId = null; }
     }
     let speedMul = (keys["shift"]?1.5:1);
@@ -677,8 +682,9 @@ function soloUpdate(dt) {
     if (floor) speedMul *= STRUCTURES[floor.type].speedMod;
     const sp = speedMul * p.speed;
     if (!inVehicle) { p.x += dx*sp*dt; p.y += dy*sp*dt; }
-    // в build-режиме ЛКМ ставит стену, а не стреляет (стрельба отключена)
-    if (mouse.down && !buildMode) soloShoot(s, p, p.angle);
+    // в build-режиме ЛКМ ставит стену, а не стреляет
+    // в машине вообще нельзя стрелять
+    if (mouse.down && !buildMode && !inVehicle) soloShoot(s, p, p.angle);
     if (p.fireCD>0) p.fireCD -= dt;
     if (p.reloading && s.timer>=p.reloadEnd) {
       p.reloading = false;
@@ -970,6 +976,9 @@ function sendInput() {
   }));
 }
 function trySwitch(w) {
+  // нельзя менять оружие в машине
+  if (solo && solo.player && solo.player.vehicleId) return;
+  if (me && me.vehicleId) return;
   if (isMultiplayer) {
     if (ws && ws.readyState===1) ws.send(JSON.stringify({ t:"switch", w }));
   } else if (solo && solo.player.alive) {
@@ -1279,17 +1288,30 @@ function buildBackground(obstacles) {
 function draw() {
   const R = getEntitiesForRender();
 
-  // Если в MP пришли obstacles — кэшируем
   if (isMultiplayer && R.obstacles && R.obstacles.length) lastObstacles = R.obstacles;
   if (isMultiplayer && (!R.obstacles || !R.obstacles.length) && lastObstacles) R.obstacles = lastObstacles;
 
-  // Подготавливаем offscreen-фон один раз
   if (!bgRendered && R.obstacles && R.obstacles.length) buildBackground(R.obstacles);
 
-  // Фон: если есть pre-rendered — рисуем drawImage (быстро); иначе fill
-  if (!bgRendered) {
-    ctx.fillStyle = "#3a5f3a";
-    ctx.fillRect(0,0,canvas.width, canvas.height);
+  // === SKY / VOID за пределами карты ===
+  // Заливаем весь экран небом (градиент)
+  const sky = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  sky.addColorStop(0, "#5b8ec9");   // голубое небо вверху
+  sky.addColorStop(0.5, "#9bc1e4"); // светлее в середине
+  sky.addColorStop(1, "#cde2f0");   // почти белое внизу (горизонт)
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  // Облака — пара статичных кругов в небе
+  ctx.fillStyle = "rgba(255,255,255,0.5)";
+  const cloudOffset = (timeNow * 3) % canvas.width;
+  for (let i=0; i<4; i++) {
+    const cx = (i*250 + cloudOffset) % (canvas.width + 200) - 100;
+    const cy = 50 + (i%2)*30;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 28, 0, TAU);
+    ctx.arc(cx+22, cy, 24, 0, TAU);
+    ctx.arc(cx+44, cy, 28, 0, TAU);
+    ctx.fill();
   }
 
   // Снайперский зум: если игрок жив, в руке снайперка и удерживается ПКМ — увеличиваем мир
@@ -1323,8 +1345,16 @@ function draw() {
     return x+r >= view.x1 && x-r <= view.x2 && y+r >= view.y1 && y-r <= view.y2;
   }
 
-  // Pre-rendered background (трава + сетка + obstacles) — одна операция drawImage
-  // bgCanvas меньше в BG_SCALE раз, поэтому src-координаты * BG_SCALE
+  // Тёмная "пропасть"-обводка ВНЕ карты (создаёт эффект острова)
+  // Рисуем тёмную рамку чуть за границей карты, чтобы was сверху видно небо
+  ctx.fillStyle = "rgba(20, 30, 50, 0.85)";  // тёмная пропасть
+  // Только за пределами мира
+  if (view.x1 < 0) ctx.fillRect(view.x1, view.y1, -view.x1, view.y2-view.y1);
+  if (view.x2 > WORLD_SIZE) ctx.fillRect(WORLD_SIZE, view.y1, view.x2-WORLD_SIZE, view.y2-view.y1);
+  if (view.y1 < 0) ctx.fillRect(Math.max(0,view.x1), view.y1, Math.min(WORLD_SIZE,view.x2)-Math.max(0,view.x1), -view.y1);
+  if (view.y2 > WORLD_SIZE) ctx.fillRect(Math.max(0,view.x1), WORLD_SIZE, Math.min(WORLD_SIZE,view.x2)-Math.max(0,view.x1), view.y2-WORLD_SIZE);
+
+  // Pre-rendered background
   if (bgRendered) {
     const sx = Math.max(0, view.x1);
     const sy = Math.max(0, view.y1);
@@ -1332,8 +1362,8 @@ function draw() {
     const sh = Math.min(WORLD_SIZE, view.y2) - sy;
     if (sw > 0 && sh > 0) {
       ctx.drawImage(bgCanvas,
-        sx*BG_SCALE, sy*BG_SCALE, sw*BG_SCALE, sh*BG_SCALE,  // src (в bgCanvas)
-        sx, sy, sw, sh);                                       // dst (в world)
+        sx*BG_SCALE, sy*BG_SCALE, sw*BG_SCALE, sh*BG_SCALE,
+        sx, sy, sw, sh);
     }
   } else {
     // фоллбэк: тонкая сетка
@@ -1473,8 +1503,18 @@ function draw() {
   }
 
   // entities (cull) — спрайты-человечки top-down
+  // если игрок в машине — собираем ID водителей
+  const drivers = new Set();
+  if (R.vehicles) for (const v of R.vehicles) {
+    if (v.dr) drivers.add(v.dr);
+    if (v.driver && v.driver.x !== undefined) drivers.add(v.driver);
+  }
+  // Для Solo: если у игрока есть vehicleId — скрыть его спрайт (он в машине)
+  const myVehicleId = (me && me.vehicleId) || (solo && solo.player && solo.player.vehicleId);
   for (const e of R.ents) {
     if (!inView(e.x, e.y, 30)) continue;
+    // Скрываем спрайт игрока если он в машине
+    if (e.isPlayer && myVehicleId) continue;
     if (!e.alive) {
       // труп
       ctx.fillStyle="rgba(60,0,0,0.5)";
