@@ -112,6 +112,14 @@ function makeBuildings() {
   return arr;
 }
 const buildings = makeBuildings();
+
+const ZIPLINES = [
+  { x1: 600, y1: 600, x2: 1800, y2: 1800 },
+  { x1: 3400, y1: 600, x2: 2200, y2: 1800 },
+  { x1: 600, y1: 3400, x2: 1800, y2: 2200 },
+  { x1: 3400, y1: 3400, x2: 2200, y2: 2200 },
+];
+let grenades = [];  // {x, y, vx, vy, fuse, owner}
 function makePickups() {
   const arr = [];
   for (let i=0;i<100;i++) {
@@ -195,8 +203,11 @@ function resetWorld() {
     p.reloading = false; p.reloadEnd = 0; p.fireCD = 0;
     p.materials = 100;
     p.vehicleId = null;
+    p.grenades_count = 2;
+    p.ziplining = null;
   });
   vehicles = makeVehicles();
+  grenades = [];
   airdrops = [];
   nextAirdropTime = timeNow + 30;  // первый дроп через 30 сек
   waitingQueue = [];
@@ -262,8 +273,11 @@ wss.on("connection", (ws) => {
     } else if (m.t === "build") {
       tryBuild(p, m.btype);
     } else if (m.t === "use") {
-      // E — войти/выйти из машины
       toggleVehicle(p);
+    } else if (m.t === "grenade") {
+      throwGrenade(p);
+    } else if (m.t === "zipline") {
+      useZipline(p);
     }
   });
 
@@ -323,6 +337,85 @@ function collideObstacles(ent) {
   }
   ent.x = clamp(ent.x, 14, WORLD_SIZE-14);
   ent.y = clamp(ent.y, 14, WORLD_SIZE-14);
+}
+
+function throwGrenade(p) {
+  if (!p.alive || p.vehicleId) return;
+  if ((p.grenades_count||0) <= 0) return;
+  p.grenades_count--;
+  const speed = 600;
+  grenades.push({
+    x: p.x + Math.cos(p.angle)*20,
+    y: p.y + Math.sin(p.angle)*20,
+    vx: Math.cos(p.angle)*speed,
+    vy: Math.sin(p.angle)*speed,
+    fuse: 2.0,
+    owner: p.id,
+  });
+}
+
+function useZipline(p) {
+  if (!p.alive || p.vehicleId) return;
+  if (p.ziplining) { p.ziplining = null; return; }
+  let best = null, bd = 80*80;
+  for (const z of ZIPLINES) {
+    const d1 = (p.x-z.x1)**2 + (p.y-z.y1)**2;
+    if (d1 < bd) { bd = d1; best = { z, fromStart:true }; }
+    const d2 = (p.x-z.x2)**2 + (p.y-z.y2)**2;
+    if (d2 < bd) { bd = d2; best = { z, fromStart:false }; }
+  }
+  if (!best) return;
+  const dist = Math.hypot(best.z.x2-best.z.x1, best.z.y2-best.z.y1);
+  p.ziplining = {
+    x1: best.fromStart?best.z.x1:best.z.x2,
+    y1: best.fromStart?best.z.y1:best.z.y2,
+    x2: best.fromStart?best.z.x2:best.z.x1,
+    y2: best.fromStart?best.z.y2:best.z.y1,
+    t: 0, duration: dist / 600,
+  };
+}
+
+function updateGrenades(dt) {
+  for (let i=grenades.length-1;i>=0;i--) {
+    const g = grenades[i];
+    g.x += g.vx*dt; g.y += g.vy*dt;
+    g.vx *= 0.92; g.vy *= 0.92;
+    g.fuse -= dt;
+    if (g.fuse <= 0) {
+      // взрыв 90px радиус 70 урона
+      const R = 90;
+      for (const t of players.values()) {
+        if (!t.alive) continue;
+        const d = Math.hypot(t.x-g.x, t.y-g.y);
+        if (d < R) {
+          const falloff = 1 - d/R;
+          let dmg = 70 * falloff;
+          if (t.armor > 0) {
+            const absorbed = Math.min(t.armor, dmg * 0.5);
+            t.armor -= absorbed; dmg -= absorbed;
+          }
+          t.hp -= dmg;
+          if (t.hp <= 0) {
+            const owner = players.get(g.owner);
+            killPlayer(t, owner, "grenade");
+            if (owner && t.id !== owner.id) owner.materials = Math.min(500, (owner.materials||0)+25);
+          }
+        }
+      }
+      grenades.splice(i, 1);
+    }
+  }
+}
+
+function updateZipliners(dt) {
+  for (const p of players.values()) {
+    if (!p.alive || !p.ziplining) continue;
+    p.ziplining.t += dt;
+    const k = Math.min(1, p.ziplining.t / p.ziplining.duration);
+    p.x = p.ziplining.x1 + (p.ziplining.x2 - p.ziplining.x1) * k;
+    p.y = p.ziplining.y1 + (p.ziplining.y2 - p.ziplining.y1) * k;
+    if (k >= 1) p.ziplining = null;
+  }
 }
 
 function toggleVehicle(p) {
@@ -653,6 +746,8 @@ setInterval(() => {
   } else if (phase === "playing") {
     for (const p of players.values()) updatePlayer(p, dt);
     updateBullets(dt);
+    updateGrenades(dt);
+    updateZipliners(dt);
     updateStorm(dt);
     // airdrops tick
     if (timeNow >= nextAirdropTime) {
@@ -729,10 +824,18 @@ setInterval(() => {
       if (dx*dx+dy*dy > R2) continue;
       ads.push({ id:a.id, x:a.x|0, y:a.y|0, s:a.state, al:Math.round(a.altitude*100)/100 });
     }
+    // гранаты в радиусе
+    const gs = [];
+    for (const g of grenades) {
+      const dx=g.x-cx, dy=g.y-cy;
+      if (dx*dx+dy*dy > R2) continue;
+      gs.push({ x:g.x|0, y:g.y|0, f:Math.round(g.fuse*10)/10 });
+    }
     const msg = {
       t:"s",
       ph: phase, cd: Math.ceil(countdown),
-      ps, bs, pks, ws: ws_, vs, ads,
+      ps, bs, pks, ws: ws_, vs, ads, gs,
+      zl: ZIPLINES,  // зиплайны статичны, шлём всегда
       st: stormObj,
       kf: killfeed,
       me: {
@@ -741,6 +844,8 @@ setInterval(() => {
         rL: p.reloading ? Math.round((p.reloadEnd - timeNow)*100)/100 : 0,
         k: p.kills, al: p.alive, ma: p.materials||0,
         vi: p.vehicleId,
+        gr: p.grenades_count||0,
+        zi: p.ziplining ? 1 : 0,
       },
     };
     p.ws.send(JSON.stringify(msg));

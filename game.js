@@ -1082,6 +1082,7 @@ function soloUpdate(dt) {
   aliveEl.textContent = aliveN;
   setHpBar(p.hp, p.maxHp, p.armor || 0, p.maxArmor || 100);
   if (hpEl) hpEl.textContent = Math.max(0, Math.floor(p.hp));
+  if (grensEl) grensEl.textContent = p.grenades || 0;
   reloadEl.style.display = p.reloading ? "block" : "none";
   if (p.alive && s.bots.every(b=>!b.alive) && !s.gameWon) {
     s.gameWon = true;
@@ -1128,6 +1129,8 @@ function startMP(url, name) {
         countdown: m.cd != null ? m.cd : m.countdown,
         vehicles: m.vs || [],
         airdrops: m.ads || [],
+        grenades: (m.gs || []).map(g => ({ x:g.x, y:g.y, fuse:g.f })),
+        ziplines: m.zl || [],
         players: (m.ps || m.players || []).map(p => ({
           id: p.id, n: p.n, x: p.x, y: p.y, a: p.a, hp: p.hp,
           al: p.al, k: p.k || 0, c: p.c, w: p.w, rl: p.rl,
@@ -1163,6 +1166,8 @@ function startMP(url, name) {
         alive: meRaw.al != null ? meRaw.al : meRaw.alive,
         materials: meRaw.ma != null ? meRaw.ma : meRaw.materials,
         vehicleId: meRaw.vi || null,
+        grenades: meRaw.gr || 0,
+        ziplining: meRaw.zi ? true : false,
       };
       prevSnap = snap;
       prevSnapTime = currSnapTime || performance.now();
@@ -1231,6 +1236,7 @@ function updateMPHud() {
   lastHudUpdate = now;
   setHpBar(me.hp || 0, 100, me.armor || 0, me.maxArmor || 100);
   if (hpEl) hpEl.textContent = me.hp;
+  if (grensEl) grensEl.textContent = me.grenades || 0;
   killsEl.textContent = me.kills;
   let aliveN = 0;
   for (const p of snap.players) if (p.al) aliveN++;
@@ -1379,6 +1385,8 @@ function getEntitiesForRender() {
       pickups: snap.pickups,
       vehicles: snap.vehicles || [],
       airdrops: snap.airdrops || [],
+      grenades: snap.grenades || [],
+      ziplines: snap.ziplines || [],
       walls: snap.walls || [],
       obstacles: snap.obstacles,
       storm: snap.storm ? { cx:snap.storm.cx, cy:snap.storm.cy, radius:snap.storm.r, targetRadius:snap.storm.tr } : null,
