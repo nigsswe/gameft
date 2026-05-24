@@ -45,6 +45,11 @@ const menuEl   = document.getElementById("menu");
 const statusEl = document.getElementById("status-line");
 const matsEl   = document.getElementById("mats");
 const grensEl  = document.getElementById("grens");
+const smokesEl = document.getElementById("smokes");
+const stunsEl  = document.getElementById("stuns");
+const bandagesEl = document.getElementById("bandages");
+const medkitsEl  = document.getElementById("medkits");
+const energyEl   = document.getElementById("energy");
 const buildHintEl = document.getElementById("build-hint");
 const soundHintEl = document.getElementById("sound-hint");
 
@@ -121,6 +126,7 @@ const mouse = { x: window.innerWidth/2, y: window.innerHeight/2, down:false, rdo
 // Маппинг физических кодов -> логических имён, которые читает движок
 const KEY_MAP = {
   "KeyW":"w","KeyA":"a","KeyS":"s","KeyD":"d","KeyR":"r","KeyQ":"q","KeyM":"m","KeyE":"e","KeyG":"g","KeyZ":"z",
+  "KeyH":"h","KeyJ":"j","KeyK":"k","KeyV":"v","KeyC":"c","KeyX":"x",
   "ShiftLeft":"shift","ShiftRight":"shift",
   "ArrowUp":"w","ArrowDown":"s","ArrowLeft":"a","ArrowRight":"d",
   "Digit1":"1","Digit2":"2","Digit3":"3","Digit4":"4",
@@ -196,11 +202,20 @@ window.addEventListener("keydown", e => {
       if (isMultiplayer && ws && ws.readyState===1) ws.send(JSON.stringify({ t:"grenade" }));
       else if (solo && solo.player && solo.player.alive) soloThrowGrenade();
     }
-    // Z — использовать зиплайн
     if (k === "z" && !e.repeat) {
       if (isMultiplayer && ws && ws.readyState===1) ws.send(JSON.stringify({ t:"zipline" }));
       else if (solo && solo.player && solo.player.alive) soloUseZipline();
     }
+    // расходники
+    if (k === "h" && !e.repeat) consume("bandage");
+    if (k === "j" && !e.repeat) consume("medkit");
+    if (k === "k" && !e.repeat) consume("energy");
+    // нож
+    if (k === "v" && !e.repeat) meleeAttack();
+    // дым
+    if (k === "c" && !e.repeat) throwSpecial("smoke");
+    // стан
+    if (k === "x" && !e.repeat) throwSpecial("stun");
     if (e.key === "F1") { setBuildType("wall"); e.preventDefault(); }
     if (e.key === "F2") { setBuildType("floor"); e.preventDefault(); }
     if (e.key === "F3") { setBuildType("ramp"); e.preventDefault(); }
@@ -293,6 +308,7 @@ function startSolo(botCount, playerName) {
     vehicles: [],
     airdrops: [],
     grenades: [],
+    specials: [],
     ziplines: makeZiplines(),
     nextAirdrop: 30,
     kills: 0,
@@ -335,9 +351,102 @@ function makeSoloPlayer(name) {
     weapons: { pistol: { ammo: WEAPONS.pistol.mag, owned:true } },
     current: "pistol", reloading:false, reloadEnd:0, fireCD:0,
     materials: 100,
-    grenades: 2,        // 2 гранаты на старт
-    ziplining: null,    // активный зиплайн {x1,y1,x2,y2,t}
+    grenades: 2,
+    smokes: 2, stuns: 1,
+    bandages: 3, medkits: 1, energy: 1,
+    consuming: null,  // {type, end}
+    stunned: 0,
+    meleeCD: 0,
+    ziplining: null,
   };
+}
+
+// === Расходники ===
+const CONSUMABLES = {
+  bandage: { time: 3.0, hp: 15, maxHp: 75 },     // до 75 HP
+  medkit:  { time: 5.0, hp: 100, maxHp: 100 },   // до 100 HP
+  energy:  { time: 4.0, armor: 100, maxArmor: 100 },
+};
+
+function consume(type) {
+  // в МП шлём серверу
+  if (isMultiplayer) {
+    if (ws && ws.readyState===1) ws.send(JSON.stringify({ t:"consume", c: type }));
+    return;
+  }
+  if (!solo || !solo.player.alive) return;
+  const p = solo.player;
+  if (p.consuming) return;  // уже используем
+  const counter = type === "bandage" ? "bandages" : type === "medkit" ? "medkits" : "energy";
+  if ((p[counter]||0) <= 0) { showMsg(`No ${type}`, "", false); return; }
+  const spec = CONSUMABLES[type];
+  if (type === "bandage" && p.hp >= spec.maxHp) { showMsg("HP too high for bandage", "", false); return; }
+  if (type === "medkit" && p.hp >= 100) { showMsg("Full HP", "", false); return; }
+  if (type === "energy" && p.armor >= 100) { showMsg("Full Armor", "", false); return; }
+  p[counter]--;
+  p.consuming = { type, end: solo.timer + spec.time };
+  showMsg(`Using ${type}...`, `${spec.time}s`, false);
+}
+
+function meleeAttack() {
+  if (isMultiplayer) {
+    if (ws && ws.readyState===1) ws.send(JSON.stringify({ t:"melee" }));
+    return;
+  }
+  if (!solo || !solo.player.alive) return;
+  const p = solo.player;
+  if (p.meleeCD > 0) return;
+  p.meleeCD = 0.6;
+  // конус 90°, дистанция 60px, урон 50
+  for (const o of solo.bots) {
+    if (!o.alive) continue;
+    const dx = o.x - p.x, dy = o.y - p.y;
+    const d = Math.hypot(dx, dy);
+    if (d > 60) continue;
+    const angTo = Math.atan2(dy, dx);
+    let diff = angTo - p.angle;
+    while (diff > Math.PI) diff -= 2*Math.PI;
+    while (diff < -Math.PI) diff += 2*Math.PI;
+    if (Math.abs(diff) < Math.PI/4) {
+      let dmg = 50;
+      if (o.armor && o.armor > 0) { const a = Math.min(o.armor, dmg*0.5); o.armor -= a; dmg -= a; }
+      o.hp -= dmg;
+      if (o.hp <= 0) {
+        o.alive = false; spawnBlood(solo, o.x, o.y);
+        solo.kills++; killsEl.textContent = solo.kills;
+        addKillfeed(`🔪 You knifed ${o.name}!`);
+        p.materials = Math.min(500, p.materials + 25);
+        matsEl.textContent = p.materials;
+      }
+    }
+  }
+  Sounds.uiClick();
+}
+
+function throwSpecial(type) {
+  if (isMultiplayer) {
+    if (ws && ws.readyState===1) ws.send(JSON.stringify({ t:"special", s: type }));
+    return;
+  }
+  if (!solo || !solo.player.alive) return;
+  const p = solo.player;
+  const counter = type === "smoke" ? "smokes" : "stuns";
+  if ((p[counter]||0) <= 0) { showMsg(`No ${type}`, "", false); return; }
+  p[counter]--;
+  solo.specials = solo.specials || [];
+  const speed = 500;
+  solo.specials.push({
+    type,
+    x: p.x + Math.cos(p.angle)*20,
+    y: p.y + Math.sin(p.angle)*20,
+    vx: Math.cos(p.angle)*speed,
+    vy: Math.sin(p.angle)*speed,
+    fuse: 1.5,
+    owner: p,
+    active: false,  // станет true после fuse
+    duration: type === "smoke" ? 8.0 : 2.5,
+  });
+  Sounds.build(0);
 }
 
 function soloThrowGrenade() {
@@ -1053,6 +1162,52 @@ function soloUpdate(dt) {
     }
   }
 
+  // === CONSUMABLES tick ===
+  if (p.consuming) {
+    if (s.timer >= p.consuming.end) {
+      const spec = CONSUMABLES[p.consuming.type];
+      if (spec.hp) p.hp = Math.min(spec.maxHp, p.hp + spec.hp);
+      if (p.consuming.type === "medkit") p.hp = 100;
+      if (spec.armor) p.armor = Math.min(p.maxArmor, p.armor + spec.armor);
+      addKillfeed(`✅ ${p.consuming.type} used`);
+      p.consuming = null;
+    }
+  }
+  // melee CD
+  if (p.meleeCD > 0) p.meleeCD -= dt;
+  // stunned
+  if (p.stunned > 0) p.stunned -= dt;
+
+  // === SPECIALS (smoke/stun) tick ===
+  for (let i=s.specials.length-1; i>=0; i--) {
+    const sp = s.specials[i];
+    if (!sp.active) {
+      sp.x += sp.vx * dt;
+      sp.y += sp.vy * dt;
+      sp.vx *= 0.92; sp.vy *= 0.92;
+      sp.fuse -= dt;
+      if (sp.fuse <= 0) {
+        sp.active = true;
+        sp.life = sp.duration;
+        if (sp.type === "stun") {
+          // мгновенный стан всех в радиусе 100
+          for (const o of [p, ...s.bots]) {
+            if (!o.alive) continue;
+            const d = Math.hypot(o.x-sp.x, o.y-sp.y);
+            if (d < 100) o.stunned = (o.stunned||0) + 2.5;
+          }
+          // вспышка
+          for (let k=0;k<20;k++) {
+            s.particles.push({ x:sp.x, y:sp.y, vx:rand(-200,200), vy:rand(-200,200), life:0.3, color:"#ffffff", r:3 });
+          }
+        }
+      }
+    } else {
+      sp.life -= dt;
+      if (sp.life <= 0) { s.specials.splice(i,1); continue; }
+      // дым не наносит урон, но визуально
+    }
+  }
   // === ZIPLINE tick ===
   if (p.ziplining && p.alive) {
     p.ziplining.t += dt;
@@ -1083,6 +1238,11 @@ function soloUpdate(dt) {
   setHpBar(p.hp, p.maxHp, p.armor || 0, p.maxArmor || 100);
   if (hpEl) hpEl.textContent = Math.max(0, Math.floor(p.hp));
   if (grensEl) grensEl.textContent = p.grenades || 0;
+  if (smokesEl) smokesEl.textContent = p.smokes || 0;
+  if (stunsEl) stunsEl.textContent = p.stuns || 0;
+  if (bandagesEl) bandagesEl.textContent = p.bandages || 0;
+  if (medkitsEl) medkitsEl.textContent = p.medkits || 0;
+  if (energyEl) energyEl.textContent = p.energy || 0;
   reloadEl.style.display = p.reloading ? "block" : "none";
   if (p.alive && s.bots.every(b=>!b.alive) && !s.gameWon) {
     s.gameWon = true;
@@ -1130,6 +1290,7 @@ function startMP(url, name) {
         vehicles: m.vs || [],
         airdrops: m.ads || [],
         grenades: (m.gs || []).map(g => ({ x:g.x, y:g.y, fuse:g.f })),
+        specials: (m.sps || []).map(s => ({ x:s.x, y:s.y, type:s.t, active:s.a, life:s.l, duration:s.d })),
         ziplines: m.zl || [],
         players: (m.ps || m.players || []).map(p => ({
           id: p.id, n: p.n, x: p.x, y: p.y, a: p.a, hp: p.hp,
@@ -1168,6 +1329,9 @@ function startMP(url, name) {
         vehicleId: meRaw.vi || null,
         grenades: meRaw.gr || 0,
         ziplining: meRaw.zi ? true : false,
+        smokes: meRaw.sm || 0, stuns: meRaw.st || 0,
+        bandages: meRaw.ba || 0, medkits: meRaw.mk || 0, energy: meRaw.en || 0,
+        consuming: meRaw.cu || null,
       };
       prevSnap = snap;
       prevSnapTime = currSnapTime || performance.now();
@@ -1237,6 +1401,11 @@ function updateMPHud() {
   setHpBar(me.hp || 0, 100, me.armor || 0, me.maxArmor || 100);
   if (hpEl) hpEl.textContent = me.hp;
   if (grensEl) grensEl.textContent = me.grenades || 0;
+  if (smokesEl) smokesEl.textContent = me.smokes || 0;
+  if (stunsEl) stunsEl.textContent = me.stuns || 0;
+  if (bandagesEl) bandagesEl.textContent = me.bandages || 0;
+  if (medkitsEl) medkitsEl.textContent = me.medkits || 0;
+  if (energyEl) energyEl.textContent = me.energy || 0;
   killsEl.textContent = me.kills;
   let aliveN = 0;
   for (const p of snap.players) if (p.al) aliveN++;
@@ -1386,6 +1555,7 @@ function getEntitiesForRender() {
       vehicles: snap.vehicles || [],
       airdrops: snap.airdrops || [],
       grenades: snap.grenades || [],
+      specials: snap.specials || [],
       ziplines: snap.ziplines || [],
       walls: snap.walls || [],
       obstacles: snap.obstacles,
@@ -1405,6 +1575,7 @@ function getEntitiesForRender() {
       vehicles: s.vehicles || [],
       airdrops: s.airdrops || [],
       grenades: s.grenades || [],
+      specials: s.specials || [],
       ziplines: s.ziplines || [],
       storm: s.storm,
       camX: s.player.x - canvas.width/2,
@@ -2069,18 +2240,41 @@ function draw() {
     }
   }
 
-  // GRENADES (мяч)
+  // GRENADES
   if (R.grenades) {
     for (const g of R.grenades) {
       if (!inView(g.x, g.y, 10)) continue;
-      // граната — тёмный шар
       ctx.fillStyle = "#3a3a3a";
       ctx.beginPath(); ctx.arc(g.x, g.y, 6, 0, TAU); ctx.fill();
       ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.stroke();
-      // мигающий красный индикатор
       const blink = (Math.floor(performance.now()/100) % 2) ? "#ff3333" : "#ffaa00";
       ctx.fillStyle = blink;
       ctx.beginPath(); ctx.arc(g.x+3, g.y-3, 2, 0, TAU); ctx.fill();
+    }
+  }
+  // SPECIALS (smoke и stun)
+  if (R.specials) {
+    for (const sp of R.specials) {
+      if (!inView(sp.x, sp.y, 120)) continue;
+      if (!sp.active) {
+        // как граната, но цвет другой
+        ctx.fillStyle = sp.type === "smoke" ? "#444" : "#eee";
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, 6, 0, TAU); ctx.fill();
+      } else if (sp.type === "smoke") {
+        // облако дыма — большой полупрозрачный круг с пульсацией
+        const t = sp.life / sp.duration;
+        const alpha = Math.min(0.7, t * 1.2);
+        ctx.fillStyle = `rgba(180,180,180,${alpha})`;
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, 80, 0, TAU); ctx.fill();
+        ctx.fillStyle = `rgba(220,220,220,${alpha*0.6})`;
+        ctx.beginPath(); ctx.arc(sp.x-15, sp.y-10, 50, 0, TAU); ctx.fill();
+        ctx.beginPath(); ctx.arc(sp.x+20, sp.y+5, 55, 0, TAU); ctx.fill();
+      } else {
+        // stun — белая вспышка
+        const t = sp.life / sp.duration;
+        ctx.fillStyle = `rgba(255,255,200,${0.5*t})`;
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, 100, 0, TAU); ctx.fill();
+      }
     }
   }
 

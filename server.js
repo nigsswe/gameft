@@ -204,10 +204,13 @@ function resetWorld() {
     p.materials = 100;
     p.vehicleId = null;
     p.grenades_count = 2;
+    p.smokes = 2; p.stuns = 1;
+    p.bandages = 3; p.medkits = 1; p.energy = 1;
+    p.consuming = null; p.stunned = 0; p.meleeCD = 0;
     p.ziplining = null;
   });
   vehicles = makeVehicles();
-  grenades = [];
+  grenades = []; specials = [];
   airdrops = [];
   nextAirdropTime = timeNow + 30;  // первый дроп через 30 сек
   waitingQueue = [];
@@ -278,6 +281,12 @@ wss.on("connection", (ws) => {
       throwGrenade(p);
     } else if (m.t === "zipline") {
       useZipline(p);
+    } else if (m.t === "consume") {
+      tryConsume(p, m.c);
+    } else if (m.t === "melee") {
+      meleeAttack(p);
+    } else if (m.t === "special") {
+      throwSpecial(p, m.s);
     }
   });
 
@@ -337,6 +346,91 @@ function collideObstacles(ent) {
   }
   ent.x = clamp(ent.x, 14, WORLD_SIZE-14);
   ent.y = clamp(ent.y, 14, WORLD_SIZE-14);
+}
+
+const CONSUMABLES_S = {
+  bandage: { time: 3.0, hp: 15, maxHp: 75, slot:"bandages" },
+  medkit:  { time: 5.0, hp: 100, maxHp: 100, slot:"medkits" },
+  energy:  { time: 4.0, armor: 100, slot:"energy" },
+};
+function tryConsume(p, type) {
+  if (!p.alive || p.consuming || !CONSUMABLES_S[type]) return;
+  const spec = CONSUMABLES_S[type];
+  if ((p[spec.slot]||0) <= 0) return;
+  if (type === "bandage" && p.hp >= spec.maxHp) return;
+  if (type === "medkit" && p.hp >= 100) return;
+  if (type === "energy" && p.armor >= 100) return;
+  p[spec.slot]--;
+  p.consuming = { type, end: timeNow + spec.time };
+}
+function tickConsume(p) {
+  if (p.consuming && timeNow >= p.consuming.end) {
+    const spec = CONSUMABLES_S[p.consuming.type];
+    if (spec.hp) p.hp = Math.min(spec.maxHp, p.hp + spec.hp);
+    if (p.consuming.type === "medkit") p.hp = 100;
+    if (spec.armor) p.armor = Math.min(p.maxArmor, p.armor + spec.armor);
+    p.consuming = null;
+  }
+}
+function meleeAttack(p) {
+  if (!p.alive || p.vehicleId) return;
+  if ((p.meleeCD||0) > 0) return;
+  p.meleeCD = 0.6;
+  for (const o of players.values()) {
+    if (o === p || !o.alive) continue;
+    const dx=o.x-p.x, dy=o.y-p.y, d=Math.hypot(dx,dy);
+    if (d > 60) continue;
+    const angTo = Math.atan2(dy, dx);
+    let diff = angTo - p.angle;
+    while (diff > Math.PI) diff -= 2*Math.PI;
+    while (diff < -Math.PI) diff += 2*Math.PI;
+    if (Math.abs(diff) < Math.PI/4) {
+      let dmg = 50;
+      if (o.armor > 0) { const a = Math.min(o.armor, dmg*0.5); o.armor -= a; dmg -= a; }
+      o.hp -= dmg;
+      if (o.hp <= 0) {
+        killPlayer(o, p, "knife");
+        p.materials = Math.min(500, (p.materials||0)+25);
+      }
+    }
+  }
+}
+let specials = [];  // {type,x,y,vx,vy,fuse,owner,active,duration,life}
+function throwSpecial(p, type) {
+  if (!p.alive || p.vehicleId) return;
+  const slot = type === "smoke" ? "smokes" : "stuns";
+  if ((p[slot]||0) <= 0) return;
+  p[slot]--;
+  const speed = 500;
+  specials.push({
+    type, x:p.x+Math.cos(p.angle)*20, y:p.y+Math.sin(p.angle)*20,
+    vx: Math.cos(p.angle)*speed, vy: Math.sin(p.angle)*speed,
+    fuse: 1.5, owner: p.id,
+    active: false, duration: type === "smoke" ? 8.0 : 2.5,
+  });
+}
+function updateSpecials(dt) {
+  for (let i=specials.length-1;i>=0;i--) {
+    const sp = specials[i];
+    if (!sp.active) {
+      sp.x += sp.vx*dt; sp.y += sp.vy*dt;
+      sp.vx *= 0.92; sp.vy *= 0.92;
+      sp.fuse -= dt;
+      if (sp.fuse <= 0) {
+        sp.active = true; sp.life = sp.duration;
+        if (sp.type === "stun") {
+          for (const o of players.values()) {
+            if (!o.alive) continue;
+            const d = Math.hypot(o.x-sp.x, o.y-sp.y);
+            if (d < 100) o.stunned = (o.stunned||0) + 2.5;
+          }
+        }
+      }
+    } else {
+      sp.life -= dt;
+      if (sp.life <= 0) specials.splice(i, 1);
+    }
+  }
 }
 
 function throwGrenade(p) {
@@ -747,7 +841,13 @@ setInterval(() => {
     for (const p of players.values()) updatePlayer(p, dt);
     updateBullets(dt);
     updateGrenades(dt);
+    updateSpecials(dt);
     updateZipliners(dt);
+    for (const p of players.values()) {
+      tickConsume(p);
+      if (p.meleeCD > 0) p.meleeCD -= dt;
+      if (p.stunned > 0) p.stunned -= dt;
+    }
     updateStorm(dt);
     // airdrops tick
     if (timeNow >= nextAirdropTime) {
@@ -831,10 +931,17 @@ setInterval(() => {
       if (dx*dx+dy*dy > R2) continue;
       gs.push({ x:g.x|0, y:g.y|0, f:Math.round(g.fuse*10)/10 });
     }
+    // спец-предметы (дым/стан) в радиусе
+    const sps = [];
+    for (const sp of specials) {
+      const dx=sp.x-cx, dy=sp.y-cy;
+      if (dx*dx+dy*dy > R2) continue;
+      sps.push({ x:sp.x|0, y:sp.y|0, t:sp.type, a:sp.active?1:0, l:sp.life ? (Math.round(sp.life*10)/10) : 0, d:sp.duration });
+    }
     const msg = {
       t:"s",
       ph: phase, cd: Math.ceil(countdown),
-      ps, bs, pks, ws: ws_, vs, ads, gs,
+      ps, bs, pks, ws: ws_, vs, ads, gs, sps,
       zl: ZIPLINES,  // зиплайны статичны, шлём всегда
       st: stormObj,
       kf: killfeed,
@@ -846,6 +953,9 @@ setInterval(() => {
         vi: p.vehicleId,
         gr: p.grenades_count||0,
         zi: p.ziplining ? 1 : 0,
+        sm: p.smokes||0, st: p.stuns||0,
+        ba: p.bandages||0, mk: p.medkits||0, en: p.energy||0,
+        cu: p.consuming ? p.consuming.type : null,
       },
     };
     p.ws.send(JSON.stringify(msg));
