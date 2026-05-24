@@ -44,6 +44,7 @@ const kfEl     = document.getElementById("killfeed");
 const menuEl   = document.getElementById("menu");
 const statusEl = document.getElementById("status-line");
 const matsEl   = document.getElementById("mats");
+const grensEl  = document.getElementById("grens");
 const buildHintEl = document.getElementById("build-hint");
 const soundHintEl = document.getElementById("sound-hint");
 
@@ -119,7 +120,7 @@ const mouse = { x: window.innerWidth/2, y: window.innerHeight/2, down:false, rdo
 
 // Маппинг физических кодов -> логических имён, которые читает движок
 const KEY_MAP = {
-  "KeyW":"w","KeyA":"a","KeyS":"s","KeyD":"d","KeyR":"r","KeyQ":"q","KeyM":"m","KeyE":"e",
+  "KeyW":"w","KeyA":"a","KeyS":"s","KeyD":"d","KeyR":"r","KeyQ":"q","KeyM":"m","KeyE":"e","KeyG":"g","KeyZ":"z",
   "ShiftLeft":"shift","ShiftRight":"shift",
   "ArrowUp":"w","ArrowDown":"s","ArrowLeft":"a","ArrowRight":"d",
   "Digit1":"1","Digit2":"2","Digit3":"3","Digit4":"4",
@@ -186,10 +187,19 @@ window.addEventListener("keydown", e => {
     if (k === "m" || (e.key && e.key.toLowerCase()==="m")) { toggleMute(); }
     if (e.key && e.key.toLowerCase()==="b") { cycleBuildType(); e.preventDefault(); }
     if (e.key && e.key.toLowerCase()==="n") { toggleMusic(); }
-    // E — войти/выйти из машины. Срабатывает один раз на нажатие.
     if (k === "e" && !e.repeat) {
       if (isMultiplayer && ws && ws.readyState===1) ws.send(JSON.stringify({ t:"use" }));
       else if (solo && solo.player && solo.player.alive) soloToggleVehicle();
+    }
+    // G — бросить гранату
+    if (k === "g" && !e.repeat) {
+      if (isMultiplayer && ws && ws.readyState===1) ws.send(JSON.stringify({ t:"grenade" }));
+      else if (solo && solo.player && solo.player.alive) soloThrowGrenade();
+    }
+    // Z — использовать зиплайн
+    if (k === "z" && !e.repeat) {
+      if (isMultiplayer && ws && ws.readyState===1) ws.send(JSON.stringify({ t:"zipline" }));
+      else if (solo && solo.player && solo.player.alive) soloUseZipline();
     }
     if (e.key === "F1") { setBuildType("wall"); e.preventDefault(); }
     if (e.key === "F2") { setBuildType("floor"); e.preventDefault(); }
@@ -282,6 +292,8 @@ function startSolo(botCount, playerName) {
     walls: [],
     vehicles: [],
     airdrops: [],
+    grenades: [],
+    ziplines: makeZiplines(),
     nextAirdrop: 30,
     kills: 0,
     storm: {
@@ -323,7 +335,74 @@ function makeSoloPlayer(name) {
     weapons: { pistol: { ammo: WEAPONS.pistol.mag, owned:true } },
     current: "pistol", reloading:false, reloadEnd:0, fireCD:0,
     materials: 100,
+    grenades: 2,        // 2 гранаты на старт
+    ziplining: null,    // активный зиплайн {x1,y1,x2,y2,t}
   };
+}
+
+function soloThrowGrenade() {
+  const s = solo; if (!s || !s.player.alive) return;
+  const p = s.player;
+  if (p.grenades <= 0) {
+    showMsg("Нет гранат!", "", false);
+    return;
+  }
+  p.grenades--;
+  // граната летит вперёд по углу мыши, замедляясь
+  const speed = 600;
+  s.grenades = s.grenades || [];
+  s.grenades.push({
+    x: p.x + Math.cos(p.angle)*20,
+    y: p.y + Math.sin(p.angle)*20,
+    vx: Math.cos(p.angle)*speed,
+    vy: Math.sin(p.angle)*speed,
+    fuse: 2.0,
+    owner: p,
+  });
+  Sounds.build(0);
+}
+
+function soloUseZipline() {
+  const s = solo; if (!s || !s.player.alive) return;
+  const p = s.player;
+  if (p.ziplining) {
+    // отменить
+    p.ziplining = null;
+    showMsg("Zipline cancelled", "", false);
+    return;
+  }
+  // найти ближайший конец зиплайна (≤80px)
+  let best = null, bd = 80*80;
+  for (const z of s.ziplines) {
+    const d1 = (p.x-z.x1)**2 + (p.y-z.y1)**2;
+    if (d1 < bd) { bd = d1; best = { z, fromStart:true }; }
+    const d2 = (p.x-z.x2)**2 + (p.y-z.y2)**2;
+    if (d2 < bd) { bd = d2; best = { z, fromStart:false }; }
+  }
+  if (!best) {
+    showMsg("No zipline nearby", "", false);
+    return;
+  }
+  const dist = Math.hypot(best.z.x2-best.z.x1, best.z.y2-best.z.y1);
+  p.ziplining = {
+    x1: best.fromStart?best.z.x1:best.z.x2,
+    y1: best.fromStart?best.z.y1:best.z.y2,
+    x2: best.fromStart?best.z.x2:best.z.x1,
+    y2: best.fromStart?best.z.y2:best.z.y1,
+    t: 0,
+    duration: dist / 600,  // 600 px/сек
+  };
+  Sounds.uiClick();
+}
+
+function makeZiplines() {
+  // 4 зиплайна по карте (длинные, через биомы)
+  return [
+    { x1: 600, y1: 600, x2: 1800, y2: 1800 },     // forest -> center
+    { x1: 3400, y1: 600, x2: 2200, y2: 1800 },    // desert -> center
+    { x1: 600, y1: 3400, x2: 1800, y2: 2200 },    // snow -> center
+    { x1: 3400, y1: 3400, x2: 2200, y2: 2200 },   // city -> center
+  ];
 }
 
 function makeSoloBot(i) {
@@ -927,6 +1006,62 @@ function soloUpdate(dt) {
       }
     }
   }
+  // === GRENADES tick ===
+  for (let i=s.grenades.length-1; i>=0; i--) {
+    const g = s.grenades[i];
+    g.x += g.vx * dt;
+    g.y += g.vy * dt;
+    g.vx *= 0.92;  // трение
+    g.vy *= 0.92;
+    g.fuse -= dt;
+    if (g.fuse <= 0) {
+      // ВЗРЫВ
+      const R = 90;
+      const all = [p, ...s.bots];
+      for (const t of all) {
+        if (!t.alive) continue;
+        const d = Math.hypot(t.x-g.x, t.y-g.y);
+        if (d < R) {
+          const falloff = 1 - d/R;
+          let dmg = 70 * falloff;
+          if (t.armor && t.armor > 0) {
+            const absorbed = Math.min(t.armor, dmg * 0.5);
+            t.armor -= absorbed; dmg -= absorbed;
+          }
+          t.hp -= dmg;
+          if (t.hp <= 0 && t !== p) {
+            t.alive = false; spawnBlood(s, t.x, t.y);
+            if (g.owner === p) {
+              s.kills++; killsEl.textContent = s.kills;
+              addKillfeed(`💣 You blew up ${t.name}!`);
+              p.materials = Math.min(500, p.materials + 25);
+              matsEl.textContent = p.materials;
+            }
+          }
+        }
+      }
+      // визуальный взрыв (частицы)
+      for (let k=0;k<30;k++) {
+        s.particles.push({
+          x: g.x, y: g.y,
+          vx: rand(-300,300), vy: rand(-300,300),
+          life: 0.6, color: k<10?"#ff4400":k<20?"#ffaa00":"#ffff66", r: 4,
+        });
+      }
+      Sounds.buildBreak(panFor({x:g.x,y:g.y}));
+      s.grenades.splice(i,1);
+    }
+  }
+
+  // === ZIPLINE tick ===
+  if (p.ziplining && p.alive) {
+    p.ziplining.t += dt;
+    const k = Math.min(1, p.ziplining.t / p.ziplining.duration);
+    p.x = p.ziplining.x1 + (p.ziplining.x2 - p.ziplining.x1) * k;
+    p.y = p.ziplining.y1 + (p.ziplining.y2 - p.ziplining.y1) * k;
+    if (k >= 1) p.ziplining = null;
+  }
+
   // storm
   if (s.timer >= s.storm.nextShrink && s.storm.targetRadius > 80) {
     s.storm.stage++;
@@ -1261,6 +1396,8 @@ function getEntitiesForRender() {
       walls: s.walls,
       vehicles: s.vehicles || [],
       airdrops: s.airdrops || [],
+      grenades: s.grenades || [],
+      ziplines: s.ziplines || [],
       storm: s.storm,
       camX: s.player.x - canvas.width/2,
       camY: s.player.y - canvas.height/2,
@@ -1896,6 +2033,49 @@ function draw() {
   }
   ctx.fill();
 
+  // ZIPLINES
+  if (R.ziplines) {
+    for (const z of R.ziplines) {
+      if (!inView((z.x1+z.x2)/2, (z.y1+z.y2)/2, Math.hypot(z.x2-z.x1, z.y2-z.y1)/2 + 50)) continue;
+      // столбы по концам
+      ctx.fillStyle = "#5a3a1a";
+      ctx.fillRect(z.x1-4, z.y1-4, 8, 8);
+      ctx.fillRect(z.x2-4, z.y2-4, 8, 8);
+      // верёвка
+      ctx.strokeStyle = "rgba(0,0,0,0.6)"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(z.x1, z.y1); ctx.lineTo(z.x2, z.y2); ctx.stroke();
+      ctx.strokeStyle = "#ffcc33"; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(z.x1, z.y1); ctx.lineTo(z.x2, z.y2); ctx.stroke();
+      // подсказка Z
+      if (R.player && R.player.alive) {
+        const d1 = Math.hypot(R.player.x-z.x1, R.player.y-z.y1);
+        const d2 = Math.hypot(R.player.x-z.x2, R.player.y-z.y2);
+        if (d1 < 90 || d2 < 90) {
+          const px = d1<d2 ? z.x1 : z.x2;
+          const py = d1<d2 ? z.y1 : z.y2;
+          ctx.fillStyle = "#ffcc33";
+          ctx.font = "bold 12px Arial"; ctx.textAlign = "center";
+          ctx.fillText("[Z] ZIPLINE", px, py-12);
+        }
+      }
+    }
+  }
+
+  // GRENADES (мяч)
+  if (R.grenades) {
+    for (const g of R.grenades) {
+      if (!inView(g.x, g.y, 10)) continue;
+      // граната — тёмный шар
+      ctx.fillStyle = "#3a3a3a";
+      ctx.beginPath(); ctx.arc(g.x, g.y, 6, 0, TAU); ctx.fill();
+      ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.stroke();
+      // мигающий красный индикатор
+      const blink = (Math.floor(performance.now()/100) % 2) ? "#ff3333" : "#ffaa00";
+      ctx.fillStyle = blink;
+      ctx.beginPath(); ctx.arc(g.x+3, g.y-3, 2, 0, TAU); ctx.fill();
+    }
+  }
+
   // particles (solo only) - cull
   if (R.particles) {
     for (const p of R.particles) {
@@ -1926,6 +2106,20 @@ function draw() {
   }
 
   ctx.restore();
+
+  // === DAY/NIGHT OVERLAY ===
+  // 4-минутный цикл: 0-1min день, 1-2min закат, 2-3min ночь, 3-4min рассвет
+  const cycleSec = 240;
+  const cyclePos = (timeNow % cycleSec) / cycleSec;
+  let darkness = 0;
+  if (cyclePos < 0.25) darkness = cyclePos * 4 * 0.6;
+  else if (cyclePos < 0.5) darkness = 0.6;
+  else if (cyclePos < 0.75) darkness = 0.6 * (1 - (cyclePos-0.5)*4);
+  // else day (0)
+  if (darkness > 0.01) {
+    ctx.fillStyle = `rgba(20, 25, 60, ${darkness})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
 
   // Снайперский прицел overlay
   if (sniperActive) {
