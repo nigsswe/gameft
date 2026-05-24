@@ -38,8 +38,8 @@ const wss = new WebSocket.Server({ server });
 
 // ---------- World config (синхронно с клиентом) ----------
 const WORLD_SIZE = 4000;
-const TICK_RATE = 30;        // 30 Hz для отзывчивости стрельбы
-const SEND_RANGE = 2200;     // обзор
+const TICK_RATE = 15;        // 15 Hz — экономим CPU и трафик, клиент интерполирует
+const SEND_RANGE = 9999;     // больше не используем culling — клиент сам
 const DT = 1 / TICK_RATE;
 const MIN_PLAYERS_TO_START = 2;
 const LOBBY_COUNTDOWN = 10;  // секунд после подключения 2-го игрока
@@ -359,7 +359,7 @@ wss.on("connection", (ws) => {
     lastSeen: Date.now(),
   };
   players.set(id, p);
-  sendTo(ws, { t:"welcome", id, world: WORLD_SIZE, weapons: WEAPONS, obstacles });
+  sendTo(ws, { t:"welcome", id, world: WORLD_SIZE, weapons: WEAPONS, obstacles, ziplines: ZIPLINES, buildings });
   if (spectating) {
     sendTo(ws, { t:"event", msg:"⏳ Матч уже идёт — вы в очереди на следующий!" });
     waitingQueue.push(id);
@@ -996,93 +996,47 @@ setInterval(() => {
     }
   }
 
-  // Персональные снапшоты с culling по дистанции (компактный формат, целые числа)
+  // === ШАРЕД СНАПШОТ: один JSON для всех ===
   const stormObj = storm ? { cx:Math.round(storm.cx), cy:Math.round(storm.cy), r:Math.round(storm.radius), tr:Math.round(storm.targetRadius), next:Math.ceil(storm.nextShrink-timeNow) } : { cx:WORLD_SIZE/2, cy:WORLD_SIZE/2, r:WORLD_SIZE/2, tr:WORLD_SIZE/2, next:0 };
-  const R2 = SEND_RANGE * SEND_RANGE;
+  const ps = [];
+  for (const o of players.values()) {
+    if (!o.alive) continue;
+    ps.push({ id:o.id, n:o.name, x:o.x|0, y:o.y|0,
+      a:Math.round(o.angle*100)/100, hp:o.hp|0,
+      al:1, c:o.color, w:o.current, rl:o.reloading?1:0 });
+  }
+  const bs = [];
+  for (let i=0;i<bullets.length;i++) bs.push(bullets[i].x|0, bullets[i].y|0);
+  const pks = pickups.map(pk => ({ x:pk.x|0, y:pk.y|0, t:pk.type }));
+  const ws_ = walls.map(w => ({ x:w.x, y:w.y, hp:w.hp|0, mh:w.maxHp, ty:w.type }));
+  const vs = vehicles.map(v => ({ id:v.id, x:v.x|0, y:v.y|0, a:Math.round(v.angle*100)/100, hp:v.hp|0, mh:v.maxHp, dr:v.driver }));
+  const ads = airdrops.map(a => ({ id:a.id, x:a.x|0, y:a.y|0, s:a.state, al:Math.round(a.altitude*100)/100 }));
+  const gs = grenades.map(g => ({ x:g.x|0, y:g.y|0, f:Math.round(g.fuse*10)/10 }));
+  const sps = specials.map(sp => ({ x:sp.x|0, y:sp.y|0, t:sp.type, a:sp.active?1:0, l:sp.life ? (Math.round(sp.life*10)/10) : 0, d:sp.duration }));
+
+  // Базовый JSON БЕЗ "me"
+  const baseMsg = {
+    t:"s", ph: phase, cd: Math.ceil(countdown),
+    ps, bs, pks, ws: ws_, vs, ads, gs, sps,
+    st: stormObj, kf: killfeed,
+  };
+  const baseJson = JSON.stringify(baseMsg);
+  const prefix = baseJson.slice(0, baseJson.length - 1) + ',"me":';
+
   for (const p of players.values()) {
-    if (p.isBot) continue;  // ботам ничего не шлём
-    if (!p.ws || p.ws.readyState !== 1) continue;
-    const cx = p.x, cy = p.y;
-    const ps = [];
-    for (const o of players.values()) {
-      if (!o.alive) continue; // мёртвых вообще не шлём
-      const dx=o.x-cx, dy=o.y-cy;
-      if (o.id !== p.id && dx*dx+dy*dy > R2) continue;
-      ps.push({ id:o.id, n:o.name, x:o.x|0, y:o.y|0,
-        a:Math.round(o.angle*100)/100, hp:o.hp|0,
-        al:1, c:o.color, w:o.current, rl:o.reloading?1:0 });
-    }
-    const bs = [];
-    for (let i=0;i<bullets.length;i++) {
-      const b = bullets[i];
-      const dx=b.x-cx, dy=b.y-cy;
-      if (dx*dx+dy*dy > R2) continue;
-      bs.push(b.x|0, b.y|0);  // плоский массив [x1,y1,x2,y2,...] — компактнее
-    }
-    const pks = [];
-    for (let i=0;i<pickups.length;i++) {
-      const pk = pickups[i];
-      const dx=pk.x-cx, dy=pk.y-cy;
-      if (dx*dx+dy*dy > R2) continue;
-      pks.push({ x:pk.x|0, y:pk.y|0, t:pk.type });
-    }
-    const ws_ = [];
-    for (let i=0;i<walls.length;i++) {
-      const w = walls[i];
-      const dx=w.x-cx, dy=w.y-cy;
-      if (dx*dx+dy*dy > R2) continue;
-      ws_.push({ x:w.x, y:w.y, hp:w.hp|0, mh:w.maxHp, ty:w.type });
-    }
-    // машины и airdrops в радиусе
-    const vs = [];
-    for (let i=0;i<vehicles.length;i++) {
-      const v = vehicles[i];
-      const dx=v.x-cx, dy=v.y-cy;
-      if (dx*dx+dy*dy > R2) continue;
-      vs.push({ id:v.id, x:v.x|0, y:v.y|0, a:Math.round(v.angle*100)/100, hp:v.hp|0, mh:v.maxHp, dr:v.driver });
-    }
-    const ads = [];
-    for (let i=0;i<airdrops.length;i++) {
-      const a = airdrops[i];
-      const dx=a.x-cx, dy=a.y-cy;
-      if (dx*dx+dy*dy > R2) continue;
-      ads.push({ id:a.id, x:a.x|0, y:a.y|0, s:a.state, al:Math.round(a.altitude*100)/100 });
-    }
-    // гранаты в радиусе
-    const gs = [];
-    for (const g of grenades) {
-      const dx=g.x-cx, dy=g.y-cy;
-      if (dx*dx+dy*dy > R2) continue;
-      gs.push({ x:g.x|0, y:g.y|0, f:Math.round(g.fuse*10)/10 });
-    }
-    // спец-предметы (дым/стан) в радиусе
-    const sps = [];
-    for (const sp of specials) {
-      const dx=sp.x-cx, dy=sp.y-cy;
-      if (dx*dx+dy*dy > R2) continue;
-      sps.push({ x:sp.x|0, y:sp.y|0, t:sp.type, a:sp.active?1:0, l:sp.life ? (Math.round(sp.life*10)/10) : 0, d:sp.duration });
-    }
-    const msg = {
-      t:"s",
-      ph: phase, cd: Math.ceil(countdown),
-      ps, bs, pks, ws: ws_, vs, ads, gs, sps,
-      zl: ZIPLINES,  // зиплайны статичны, шлём всегда
-      st: stormObj,
-      kf: killfeed,
-      me: {
-        hp:p.hp|0, ar:p.armor|0, mar:p.maxArmor,
-        we: p.weapons, c: p.current, rl: p.reloading,
-        rL: p.reloading ? Math.round((p.reloadEnd - timeNow)*100)/100 : 0,
-        k: p.kills, al: p.alive, ma: p.materials||0,
-        vi: p.vehicleId,
-        gr: p.grenades_count||0,
-        zi: p.ziplining ? 1 : 0,
-        sm: p.smokes||0, st: p.stuns||0,
-        ba: p.bandages||0, mk: p.medkits||0, en: p.energy||0,
-        cu: p.consuming ? p.consuming.type : null,
-      },
+    if (p.isBot || !p.ws || p.ws.readyState !== 1) continue;
+    const meObj = {
+      hp:p.hp|0, ar:p.armor|0, mar:p.maxArmor,
+      we: p.weapons, c: p.current, rl: p.reloading,
+      rL: p.reloading ? Math.round((p.reloadEnd - timeNow)*100)/100 : 0,
+      k: p.kills, al: p.alive, ma: p.materials||0,
+      vi: p.vehicleId, gr: p.grenades_count||0, zi: p.ziplining ? 1 : 0,
+      sm: p.smokes||0, st: p.stuns||0,
+      ba: p.bandages||0, mk: p.medkits||0, en: p.energy||0,
+      cu: p.consuming ? p.consuming.type : null,
+      id: p.id,
     };
-    p.ws.send(JSON.stringify(msg));
+    p.ws.send(prefix + JSON.stringify(meObj) + "}");
   }
 }, 1000/TICK_RATE);
 

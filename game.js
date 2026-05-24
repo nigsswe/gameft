@@ -1098,6 +1098,10 @@ function soloUpdate(dt) {
     let speedMul = (keys["shift"]?1.5:1);
     const floor = floorUnder(s.walls, p.x, p.y);
     if (floor) speedMul *= STRUCTURES[floor.type].speedMod;
+    // ARTIFACT speed boost
+    if (p.artifact && ARTIFACTS[p.artifact.type].spdMul) {
+      speedMul *= ARTIFACTS[p.artifact.type].spdMul;
+    }
     const sp = speedMul * p.speed;
     if (!inVehicle) { p.x += dx*sp*dt; p.y += dy*sp*dt; }
     // в build-режиме ЛКМ ставит стену, а не стреляет
@@ -1455,6 +1459,8 @@ function startMP(url, name) {
     if (m.t==="welcome") {
       myId = m.id; WORLD_SIZE = m.world;
       if (m.obstacles) lastObstacles = m.obstacles;
+      if (m.ziplines) lastZiplines = m.ziplines;
+      if (m.buildings) lastBuildings = m.buildings;
     }
     else if (m.t==="s" || m.t==="state") {
       // Нормализуем компактный формат в старый, чтобы остальной код не менять
@@ -1465,7 +1471,7 @@ function startMP(url, name) {
         airdrops: m.ads || [],
         grenades: (m.gs || []).map(g => ({ x:g.x, y:g.y, fuse:g.f })),
         specials: (m.sps || []).map(s => ({ x:s.x, y:s.y, type:s.t, active:s.a, life:s.l, duration:s.d })),
-        ziplines: m.zl || [],
+        ziplines: m.zl || lastZiplines || [],
         players: (m.ps || m.players || []).map(p => ({
           id: p.id, n: p.n, x: p.x, y: p.y, a: p.a, hp: p.hp,
           al: p.al, k: p.k || 0, c: p.c, w: p.w, rl: p.rl,
@@ -1762,6 +1768,8 @@ function getEntitiesForRender() {
 
 // Кэш для obstacles из MP (приходят редко, не хотим каждый кадр)
 let lastObstacles = null;
+let lastZiplines = null;
+let lastBuildings = null;
 // Pre-rendered background (grass + grid + obstacles) — рисуется один раз
 let bgCanvas = null;
 let bgRendered = false;
