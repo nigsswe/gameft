@@ -127,6 +127,7 @@ const mouse = { x: window.innerWidth/2, y: window.innerHeight/2, down:false, rdo
 const KEY_MAP = {
   "KeyW":"w","KeyA":"a","KeyS":"s","KeyD":"d","KeyR":"r","KeyQ":"q","KeyM":"m","KeyE":"e","KeyG":"g","KeyZ":"z",
   "KeyH":"h","KeyJ":"j","KeyK":"k","KeyV":"v","KeyC":"c","KeyX":"x",
+  "Space":"space",
   "ShiftLeft":"shift","ShiftRight":"shift",
   "ArrowUp":"w","ArrowDown":"s","ArrowLeft":"a","ArrowRight":"d",
   "Digit1":"1","Digit2":"2","Digit3":"3","Digit4":"4",
@@ -303,7 +304,89 @@ const STATS = {
   }
 };
 // показать на старте
-setTimeout(() => STATS.updateMenu(), 100);
+setTimeout(() => { STATS.updateMenu(); SKIN.init(); ACHIEVEMENTS.refresh(); DAILIES.refresh(); }, 100);
+
+// ===== SKIN =====
+const SKIN = {
+  get() { return localStorage.getItem("br_skin") || "#3aa3ff"; },
+  set(c) { localStorage.setItem("br_skin", c); },
+  init() {
+    const sel = document.getElementById("skin-select");
+    if (!sel) return;
+    sel.value = SKIN.get();
+    sel.onchange = () => SKIN.set(sel.value);
+  }
+};
+
+// ===== ACHIEVEMENTS =====
+const ACHIEVEMENTS_DEFS = [
+  { id:"first_kill", name:"🩸 First Blood", desc:"Сделать первое убийство", check:(s)=>s.kills>=1 },
+  { id:"kills_10", name:"⚔ Boomer", desc:"10 убийств всего", check:(s)=>s.kills>=10 },
+  { id:"kills_50", name:"💀 Hunter", desc:"50 убийств всего", check:(s)=>s.kills>=50 },
+  { id:"kills_100", name:"☠ Killer", desc:"100 убийств всего", check:(s)=>s.kills>=100 },
+  { id:"win_1", name:"🥇 First Victory", desc:"Выиграть 1 матч", check:(s)=>s.wins>=1 },
+  { id:"win_5", name:"🏆 Champion", desc:"5 побед", check:(s)=>s.wins>=5 },
+  { id:"win_25", name:"👑 Legend", desc:"25 побед", check:(s)=>s.wins>=25 },
+  { id:"games_10", name:"🎮 Dedicated", desc:"10 матчей сыграно", check:(s)=>s.games>=10 },
+  { id:"games_50", name:"🎯 Veteran", desc:"50 матчей сыграно", check:(s)=>s.games>=50 },
+  { id:"mmr_1200", name:"📈 Rising Star", desc:"Достичь 1200 MMR", check:(s)=>s.mmr>=1200 },
+  { id:"mmr_1500", name:"⭐ Elite", desc:"Достичь 1500 MMR", check:(s)=>s.mmr>=1500 },
+  { id:"mmr_2000", name:"🌟 Pro", desc:"Достичь 2000 MMR", check:(s)=>s.mmr>=2000 },
+];
+const ACHIEVEMENTS = {
+  refresh() {
+    const s = STATS.load();
+    const el = document.getElementById("achievements-list");
+    if (!el) return;
+    el.innerHTML = ACHIEVEMENTS_DEFS.map(a => {
+      const done = a.check(s);
+      return `<div style="margin-bottom:4px; ${done?'color:#88ff88;':'color:#888;'}">${done?'✅':'⬜'} <b>${a.name}</b> — ${a.desc}</div>`;
+    }).join("");
+  }
+};
+
+// ===== DAILY QUESTS =====
+const DAILY_QUESTS = [
+  { id:"d_kills_3", name:"Сделать 3 убийства", goal:3, type:"kills", reward:50 },
+  { id:"d_play_2", name:"Сыграть 2 матча", goal:2, type:"games", reward:30 },
+  { id:"d_win_1", name:"Выиграть 1 матч", goal:1, type:"wins", reward:100 },
+  { id:"d_kills_5", name:"Сделать 5 убийств", goal:5, type:"kills", reward:80 },
+  { id:"d_kills_10", name:"Сделать 10 убийств", goal:10, type:"kills", reward:150 },
+];
+const DAILIES = {
+  load() {
+    const today = new Date().toDateString();
+    let d = JSON.parse(localStorage.getItem("br_dailies") || "{}");
+    if (d.date !== today) {
+      // выбираем 3 случайных задания
+      const shuffled = [...DAILY_QUESTS].sort(()=>Math.random()-0.5).slice(0,3);
+      d = { date: today, quests: shuffled.map(q => ({ ...q, start: STATS.load()[q.type], done:false, claimed:false })) };
+      localStorage.setItem("br_dailies", JSON.stringify(d));
+    }
+    return d;
+  },
+  refresh() {
+    const d = DAILIES.load();
+    const s = STATS.load();
+    const el = document.getElementById("daily-list");
+    if (!el) return;
+    el.innerHTML = d.quests.map(q => {
+      const progress = Math.min(q.goal, s[q.type] - q.start);
+      const done = progress >= q.goal;
+      if (done && !q.claimed) {
+        q.claimed = true;
+        s.mmr += q.reward;
+        STATS.save(s);
+        addClaimNotification(q);
+      }
+      return `<div>${done?'✅':'⬜'} ${q.name} — ${progress}/${q.goal} <span style="color:#ffcc33;">[+${q.reward} MMR]</span></div>`;
+    }).join("");
+    localStorage.setItem("br_dailies", JSON.stringify(d));
+  }
+};
+function addClaimNotification(q) {
+  console.log("Quest claimed:", q.name, "+", q.reward, "MMR");
+}
 
 // ---------- Engine state ----------
 let running = false;
@@ -382,7 +465,7 @@ function startSolo(botCount, playerName) {
 function makeSoloPlayer(name) {
   return {
     x: WORLD_SIZE/2, y: WORLD_SIZE/2, r:14, angle:0,
-    name, color:"#3aa3ff",
+    name, color: SKIN.get(),
     hp:100, maxHp:100, speed:220, alive:true, isPlayer:true,
     armor: 0, maxArmor: 100,
     weapons: { pistol: { ammo: WEAPONS.pistol.mag, owned:true } },
@@ -391,11 +474,27 @@ function makeSoloPlayer(name) {
     grenades: 2,
     smokes: 2, stuns: 1,
     bandages: 3, medkits: 1, energy: 1,
-    consuming: null,  // {type, end}
+    consuming: null,
     stunned: 0,
     meleeCD: 0,
     ziplining: null,
+    jetpackFuel: 3.0, jetpackMax: 3.0,
+    artifact: null,
   };
+}
+
+// === ARTIFACTS ===
+const ARTIFACTS = {
+  dmg2x: { name:"⚡ Double Damage", duration:15, dmgMul:2 },
+  spd2x: { name:"💨 Speed Boost",   duration:15, spdMul:1.8 },
+  invis: { name:"👻 Invisibility",  duration:10 },
+};
+function maybeDropArtifact(s, x, y) {
+  if (Math.random() < 0.15) {
+    const keys = Object.keys(ARTIFACTS);
+    const t = keys[Math.floor(Math.random()*keys.length)];
+    s.pickups.push({ id: Date.now()+Math.random(), x, y, type: "artifact_"+t, r: 12 });
+  }
 }
 
 // === Расходники ===
@@ -917,6 +1016,32 @@ function soloUpdate(dt) {
     const aimWX = mouse.x + (p.x - canvas.width/2);
     const aimWY = mouse.y + (p.y - canvas.height/2);
     p.angle = Math.atan2(aimWY-p.y, aimWX-p.x);
+    // === ARTIFACT tick ===
+    if (p.artifact && s.timer >= p.artifact.end) {
+      addKillfeed(`🌟 ${ARTIFACTS[p.artifact.type].name} ended`);
+      p.artifact = null;
+    }
+    // === JETPACK ===
+    if (keys["space"] && p.jetpackFuel > 0 && p.alive) {
+      // подкидывает вверх (быстрее в направлении мыши)
+      const boost = 60;
+      p.x += Math.cos(p.angle) * boost * dt * 5;
+      p.y += Math.sin(p.angle) * boost * dt * 5;
+      p.jetpackFuel -= dt;
+      // частицы дыма за персонажем
+      if (Math.random() < 0.6) {
+        s.particles.push({
+          x: p.x - Math.cos(p.angle)*15, y: p.y - Math.sin(p.angle)*15,
+          vx: -Math.cos(p.angle)*100 + rand(-30,30),
+          vy: -Math.sin(p.angle)*100 + rand(-30,30),
+          life: 0.5, color: "#ddd", r: 4,
+        });
+      }
+    } else if (p.jetpackFuel < p.jetpackMax && !keys["space"]) {
+      // регенит когда не используешь
+      p.jetpackFuel = Math.min(p.jetpackMax, p.jetpackFuel + dt * 0.5);
+    }
+
     // === Вождение машины (Solo) ===
     let inVehicle = false;
     if (p.vehicleId) {
@@ -1008,6 +1133,14 @@ function soloUpdate(dt) {
         } else if (pk.type === "material") {
           p.materials = Math.min(500, p.materials + 20);
           matsEl.textContent = p.materials;
+        } else if (pk.type.startsWith("artifact_")) {
+          const at = pk.type.slice(9);
+          const spec = ARTIFACTS[at];
+          if (spec) {
+            p.artifact = { type:at, end: s.timer + spec.duration };
+            addKillfeed(`🌟 Got ${spec.name}!`);
+            Sounds.victory();
+          }
         } else if (WEAPONS[pk.type]) {
           if (!p.weapons[pk.type]) p.weapons[pk.type] = { ammo:WEAPONS[pk.type].mag, owned:true };
           else p.weapons[pk.type].ammo = WEAPONS[pk.type].mag;
@@ -1097,12 +1230,13 @@ function soloUpdate(dt) {
           if (t.hp<=0) {
             t.alive=false;
             if (t === p) {
-              // игрок убит — обработка в основном цикле
+              // игрок убит
             } else if (b.owner===p) {
               s.kills++; killsEl.textContent = s.kills;
               addKillfeed(`You killed ${t.name} (${WEAPONS[p.current].name})`);
               p.materials = Math.min(500, p.materials + 25);
               matsEl.textContent = p.materials;
+              maybeDropArtifact(s, t.x, t.y);
             } else if (b.owner === t) {
               // self-damage (не должно случиться)
             } else {
@@ -1955,6 +2089,17 @@ function draw() {
     } else if (p.type==="ammo") {
       ctx.fillStyle="#f1c40f"; ctx.fillRect(p.x-7,p.y-7,14,14);
       ctx.fillStyle="#000"; ctx.fillRect(p.x-5,p.y-2,10,4);
+    } else if (p.type && p.type.startsWith && p.type.startsWith("artifact_")) {
+      // светящийся артефакт
+      const t = p.type.slice(9);
+      const glow = ((Math.sin(performance.now()/200)+1)/2);
+      ctx.fillStyle = t === "dmg2x" ? `rgba(255,80,80,${0.4+glow*0.4})` :
+                      t === "spd2x" ? `rgba(80,200,255,${0.4+glow*0.4})` :
+                      `rgba(200,80,255,${0.4+glow*0.4})`;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 18, 0, TAU); ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 14px Arial"; ctx.textAlign = "center";
+      ctx.fillText(t === "dmg2x" ? "⚡" : t === "spd2x" ? "💨" : "👻", p.x, p.y+5);
     } else if (p.type==="material") {
       ctx.fillStyle="#cfa05a"; ctx.fillRect(p.x-7,p.y-7,14,14);
       ctx.strokeStyle="#7a5a30"; ctx.lineWidth=1; ctx.strokeRect(p.x-7,p.y-7,14,14);
@@ -2348,6 +2493,52 @@ function draw() {
   }
 
   ctx.restore();
+
+  // === WEATHER PARTICLES (за биом) ===
+  // Определяем биом центра экрана
+  const camCx = R.camX + canvas.width/2;
+  const camCy = R.camY + canvas.height/2;
+  let camBiome = "forest";
+  if (camCx >= WORLD_SIZE/2 && camCy < WORLD_SIZE/2) camBiome = "desert";
+  else if (camCx < WORLD_SIZE/2 && camCy >= WORLD_SIZE/2) camBiome = "snow";
+  else if (camCx >= WORLD_SIZE/2 && camCy >= WORLD_SIZE/2) camBiome = "city";
+  // Эффекты
+  if (camBiome === "snow") {
+    // снежинки
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    const flakes = 80;
+    for (let i=0; i<flakes; i++) {
+      const phase = (i*7919 + timeNow*60) % canvas.height;
+      const x = (i*37 + Math.sin(timeNow + i)*30) % canvas.width;
+      ctx.fillRect(x, phase, 2, 2);
+    }
+  } else if (camBiome === "forest") {
+    // редкий дождь
+    ctx.strokeStyle = "rgba(100,150,200,0.45)"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    const drops = 60;
+    for (let i=0; i<drops; i++) {
+      const phase = (i*4133 + timeNow*900) % canvas.height;
+      const x = (i*61) % canvas.width;
+      ctx.moveTo(x, phase); ctx.lineTo(x-4, phase+10);
+    }
+    ctx.stroke();
+  } else if (camBiome === "desert") {
+    // жара — горизонтальные волны (warm glow overlay)
+    ctx.fillStyle = "rgba(255,200,100,0.08)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // песчаные пылинки
+    ctx.fillStyle = "rgba(200,180,120,0.5)";
+    for (let i=0; i<30; i++) {
+      const x = (i*123 + timeNow*120) % canvas.width;
+      const y = canvas.height - 50 - (i*9 % (canvas.height/3));
+      ctx.fillRect(x, y, 2, 2);
+    }
+  } else if (camBiome === "city") {
+    // лёгкий туман
+    ctx.fillStyle = "rgba(150,150,160,0.08)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
 
   // === DAY/NIGHT OVERLAY ===
   // 4-минутный цикл: 0-1min день, 1-2min закат, 2-3min ночь, 3-4min рассвет
