@@ -113,6 +113,116 @@ function makeBuildings() {
 }
 const buildings = makeBuildings();
 
+// === БОТЫ В МП ===
+const MIN_PLAYERS_FOR_GAME = 6;  // если меньше игроков, добиваем ботами до 6
+const BOT_NAMES = ["Ивaн","Macha","Bot_X","Killer","Nova","Phoenix","Shadow","Vortex","Razor","Ghost"];
+let nextBotId = 9000;
+function spawnBot() {
+  const id = nextBotId++;
+  const name = BOT_NAMES[Math.floor(Math.random()*BOT_NAMES.length)] + (Math.floor(Math.random()*99));
+  const bot = {
+    id, isBot: true, name,
+    x: WORLD_SIZE/2 + rand(-1500, 1500),
+    y: WORLD_SIZE/2 + rand(-1500, 1500),
+    angle: rand(0, TAU),
+    hp: 100, alive: true, kills: 0,
+    armor: 0, maxArmor: 100,
+    color: `hsl(${(id*53)%360},70%,55%)`,
+    weapons: { pistol: { ammo: WEAPONS.pistol.mag, owned:true } },
+    current: ["pistol","pistol","ar","shotgun","sniper"][Math.floor(Math.random()*5)],
+    reloading: false, reloadEnd: 0, fireCD: rand(0,1),
+    materials: 100, vehicleId: null,
+    grenades_count: 0, smokes: 0, stuns: 0, bandages: 0, medkits: 0, energy: 0,
+    consuming: null, stunned: 0, meleeCD: 0, ziplining: null,
+    input: { up:false, down:false, left:false, right:false, sprint:false, shoot:false, reload:false, angle:0, action:false },
+    wanderTimer: 0, wanderDir: rand(0, TAU),
+    sightRange: rand(400, 600),
+    accuracy: rand(0.08, 0.22),
+    _strafe: Math.random()<0.5?1:-1,
+  };
+  // Если бот выбрал не-pistol — добавим
+  if (bot.current !== "pistol" && !bot.weapons[bot.current]) {
+    bot.weapons[bot.current] = { ammo: WEAPONS[bot.current].mag, owned: true };
+  }
+  players.set(id, bot);
+  console.log(`[BOT] Spawned ${name} (id ${id})`);
+  return bot;
+}
+function despawnBot(b) {
+  players.delete(b.id);
+}
+function ensureBotsForLobby() {
+  // считаем не-ботов
+  let realPlayers = 0;
+  for (const p of players.values()) if (!p.isBot) realPlayers++;
+  // если есть >=1 человек, набираем до MIN_PLAYERS_FOR_GAME
+  if (realPlayers >= 1) {
+    let total = players.size;
+    while (total < MIN_PLAYERS_FOR_GAME) { spawnBot(); total++; }
+  }
+  // если все люди вышли, убираем ботов
+  if (realPlayers === 0) {
+    for (const p of [...players.values()]) if (p.isBot) despawnBot(p);
+  }
+}
+function botTick(b, dt) {
+  if (!b.alive || b.stunned > 0) return;
+  // ищем ближайшую цель
+  let nearest = null, nd2 = b.sightRange*b.sightRange;
+  for (const o of players.values()) {
+    if (o === b || !o.alive) continue;
+    const d2 = (o.x-b.x)**2 + (o.y-b.y)**2;
+    if (d2 < nd2) { nearest = o; nd2 = d2; }
+  }
+  if (nearest) {
+    const dx = nearest.x-b.x, dy = nearest.y-b.y;
+    const ang = Math.atan2(dy, dx);
+    b.angle = ang;
+    const d = Math.sqrt(nd2);
+    const optimal = b.current==="shotgun"?140 : b.current==="sniper"?500 : 260;
+    let mvx=0, mvy=0;
+    if (d < optimal*0.7) { mvx = -Math.cos(ang); mvy = -Math.sin(ang); }
+    else if (d > optimal*1.3) { mvx = Math.cos(ang); mvy = Math.sin(ang); }
+    else { mvx = -Math.sin(ang)*b._strafe; mvy = Math.cos(ang)*b._strafe; }
+    if (Math.random()<0.01) b._strafe = Math.random()<0.5?1:-1;
+    b.x += mvx * 180 * dt;
+    b.y += mvy * 180 * dt;
+    collideObstacles(b);
+    // стрельба
+    if (b.fireCD > 0) b.fireCD -= dt;
+    const w = WEAPONS[b.current], inv = b.weapons[b.current];
+    if (w && inv && inv.ammo > 0 && b.fireCD <= 0 && d < b.sightRange) {
+      const jitter = (Math.random()-0.5)*b.accuracy*2;
+      const a = ang + jitter;
+      const pellets = w.pellets || 1;
+      for (let i=0;i<pellets;i++) {
+        const aa = a + (Math.random()-0.5)*w.spread*2;
+        bullets.push({
+          x: b.x + Math.cos(aa)*16, y: b.y + Math.sin(aa)*16,
+          vx: Math.cos(aa)*w.bulletSpeed, vy: Math.sin(aa)*w.bulletSpeed,
+          life: 1.0 * w.range, dmg: w.dmg, owner: b.id,
+        });
+      }
+      b.fireCD = w.cooldown * 1.3;  // боты чуть медленнее
+      inv.ammo--;
+      if (inv.ammo <= 0) { inv.ammo = w.mag; b.fireCD = w.reload; }  // быстрая перезарядка
+    }
+  } else {
+    b.wanderTimer -= dt;
+    if (b.wanderTimer <= 0) { b.wanderTimer = rand(1,3); b.wanderDir = rand(0,TAU); }
+    b.x += Math.cos(b.wanderDir) * 80 * dt;
+    b.y += Math.sin(b.wanderDir) * 80 * dt;
+    b.angle = b.wanderDir;
+    collideObstacles(b);
+  }
+  // storm
+  if (storm) {
+    const sdx = b.x-storm.cx, sdy = b.y-storm.cy;
+    if (sdx*sdx+sdy*sdy > storm.radius*storm.radius) b.hp -= storm.dmgPerSec*dt;
+    if (b.hp <= 0) killPlayer(b, null, "storm");
+  }
+}
+
 const ZIPLINES = [
   { x1: 600, y1: 600, x2: 1800, y2: 1800 },
   { x1: 3400, y1: 600, x2: 2200, y2: 1800 },
@@ -256,6 +366,9 @@ wss.on("connection", (ws) => {
   }
   console.log(`[+] Player ${id} connected (${spectating?"spectator":"alive"}). Total: ${players.size}`);
 
+  // Если это первый человек — спавним ботов для лобби
+  ensureBotsForLobby();
+
   if (phase === "lobby" && players.size >= MIN_PLAYERS_TO_START) {
     phase = "countdown"; countdown = LOBBY_COUNTDOWN;
   }
@@ -294,7 +407,14 @@ wss.on("connection", (ws) => {
     players.delete(id);
     waitingQueue = waitingQueue.filter(qid => qid !== id);
     console.log(`[-] Player ${id} disconnected. Total: ${players.size}`);
-    if (players.size === 0) { phase = "lobby"; storm = null; }
+    ensureBotsForLobby();
+    let realCount = 0;
+    for (const pp of players.values()) if (!pp.isBot) realCount++;
+    if (realCount === 0) {
+      phase = "lobby"; storm = null;
+      // убираем ботов
+      for (const pp of [...players.values()]) if (pp.isBot) players.delete(pp.id);
+    }
   });
 });
 
@@ -838,7 +958,10 @@ setInterval(() => {
       broadcast({ t:"event", msg:"DROP IN! 🪂" });
     }
   } else if (phase === "playing") {
-    for (const p of players.values()) updatePlayer(p, dt);
+    for (const p of players.values()) {
+      if (p.isBot) botTick(p, dt);
+      else updatePlayer(p, dt);
+    }
     updateBullets(dt);
     updateGrenades(dt);
     updateSpecials(dt);
@@ -877,7 +1000,8 @@ setInterval(() => {
   const stormObj = storm ? { cx:Math.round(storm.cx), cy:Math.round(storm.cy), r:Math.round(storm.radius), tr:Math.round(storm.targetRadius), next:Math.ceil(storm.nextShrink-timeNow) } : { cx:WORLD_SIZE/2, cy:WORLD_SIZE/2, r:WORLD_SIZE/2, tr:WORLD_SIZE/2, next:0 };
   const R2 = SEND_RANGE * SEND_RANGE;
   for (const p of players.values()) {
-    if (p.ws.readyState !== 1) continue;
+    if (p.isBot) continue;  // ботам ничего не шлём
+    if (!p.ws || p.ws.readyState !== 1) continue;
     const cx = p.x, cy = p.y;
     const ps = [];
     for (const o of players.values()) {

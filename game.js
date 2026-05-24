@@ -268,6 +268,43 @@ canvas.addEventListener("wheel", e => {
   e.preventDefault();
 }, { passive:false });
 
+// ===== MMR / Stats (localStorage) =====
+const STATS = {
+  load() {
+    try {
+      const s = JSON.parse(localStorage.getItem("br_stats") || "{}");
+      return { mmr: s.mmr || 1000, games: s.games || 0, kills: s.kills || 0, wins: s.wins || 0 };
+    } catch { return { mmr: 1000, games: 0, kills: 0, wins: 0 }; }
+  },
+  save(s) { localStorage.setItem("br_stats", JSON.stringify(s)); },
+  addMatch(place, kills, totalPlayers) {
+    const s = STATS.load();
+    s.games++;
+    s.kills += kills;
+    let delta = 0;
+    if (place === 1) { s.wins++; delta = 30 + kills*3; }
+    else if (place <= 3) delta = 15 + kills*3;
+    else if (place <= 10) delta = 5 + kills*2;
+    else delta = -10 + kills*2;
+    s.mmr = Math.max(0, s.mmr + delta);
+    STATS.save(s);
+    return { delta, newMmr: s.mmr };
+  },
+  updateMenu() {
+    const s = STATS.load();
+    const e1 = document.getElementById("my-mmr");
+    const e2 = document.getElementById("my-games");
+    const e3 = document.getElementById("my-kills");
+    const e4 = document.getElementById("my-wins");
+    if (e1) e1.textContent = s.mmr;
+    if (e2) e2.textContent = s.games;
+    if (e3) e3.textContent = s.kills;
+    if (e4) e4.textContent = s.wins;
+  }
+};
+// показать на старте
+setTimeout(() => STATS.updateMenu(), 100);
+
 // ---------- Engine state ----------
 let running = false;
 let isMultiplayer = false;
@@ -990,7 +1027,9 @@ function soloUpdate(dt) {
       s.gameOver = true;
       Sounds.death();
       const place = 1 + s.bots.filter(b=>b.alive).length;
-      showMsg("YOU DIED 💀", `Место: #${place}. Kills: ${s.kills}. Нажми F5 для рестарта.`, true);
+      const total = s.bots.length + 1;
+      const stats = STATS.addMatch(place, s.kills, total);
+      showMsg("YOU DIED 💀", `Место: #${place}/${total} | Kills: ${s.kills} | MMR ${stats.delta>=0?"+":""}${stats.delta} → ${stats.newMmr}. F5 для рестарта.`, true);
     }
   }
   // bots
@@ -1247,7 +1286,8 @@ function soloUpdate(dt) {
   if (p.alive && s.bots.every(b=>!b.alive) && !s.gameWon) {
     s.gameWon = true;
     Sounds.victory();
-    showMsg("🏆 VICTORY ROYALE!", `Kills: ${s.kills}. F5 для рестарта.`, true);
+    const stats = STATS.addMatch(1, s.kills, s.bots.length + 1);
+    showMsg("🏆 VICTORY ROYALE!", `Kills: ${s.kills} | MMR +${stats.delta} → ${stats.newMmr}. F5 для рестарта.`, true);
   }
 }
 
